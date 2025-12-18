@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getCategories, createCategory, deleteCategory } from '../controllers/category.controller';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router = Router({ mergeParams: true });
 
 router.use(authMiddleware);
 

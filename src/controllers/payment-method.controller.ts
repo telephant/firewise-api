@@ -8,12 +8,12 @@ export const getPaymentMethods = async (
   res: Response<ApiResponse<PaymentMethod[]>>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
+    const { ledgerId } = req.params;
 
     const { data: paymentMethods, error } = await supabaseAdmin
       .from('payment_methods')
       .select('*')
-      .or(`created_by.eq.${userId},created_by.is.null`)
+      .eq('ledger_id', ledgerId)
       .order('name', { ascending: true });
 
     if (error) {
@@ -32,7 +32,7 @@ export const createPaymentMethod = async (
   res: Response<ApiResponse<PaymentMethod>>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
+    const { ledgerId } = req.params;
     const { name, description } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -44,7 +44,7 @@ export const createPaymentMethod = async (
       .from('payment_methods')
       .select('id')
       .eq('name', name.trim())
-      .eq('created_by', userId)
+      .eq('ledger_id', ledgerId)
       .single();
 
     if (existing) {
@@ -57,7 +57,7 @@ export const createPaymentMethod = async (
       .insert({
         name: name.trim(),
         description: description?.trim() || null,
-        created_by: userId,
+        ledger_id: ledgerId,
       })
       .select()
       .single();
@@ -78,22 +78,17 @@ export const deletePaymentMethod = async (
   res: Response<ApiResponse>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
-    const { id } = req.params;
+    const { ledgerId, id } = req.params;
 
     const { data: paymentMethod, error: fetchError } = await supabaseAdmin
       .from('payment_methods')
-      .select('created_by')
+      .select('ledger_id')
       .eq('id', id)
+      .eq('ledger_id', ledgerId)
       .single();
 
     if (fetchError || !paymentMethod) {
       res.status(404).json({ success: false, error: 'Payment method not found' });
-      return;
-    }
-
-    if (paymentMethod.created_by !== userId) {
-      res.status(403).json({ success: false, error: 'Cannot delete this payment method' });
       return;
     }
 

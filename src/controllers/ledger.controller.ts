@@ -156,7 +156,7 @@ export const updateLedger = async (
   try {
     const userId = req.user!.id;
     const { id } = req.params;
-    const { name, description } = req.body;
+    const { name, description, default_currency_id } = req.body;
 
     const { data: ledgerUser, error: luError } = await supabaseAdmin
       .from('ledger_users')
@@ -173,6 +173,7 @@ export const updateLedger = async (
     const updates: Partial<Ledger> = { updated_at: new Date().toISOString() };
     if (name !== undefined) updates.name = name.trim();
     if (description !== undefined) updates.description = description?.trim() || null;
+    if (default_currency_id !== undefined) updates.default_currency_id = default_currency_id || null;
 
     const { data: ledger, error } = await supabaseAdmin
       .from('ledgers')

@@ -8,12 +8,12 @@ export const getCategories = async (
   res: Response<ApiResponse<ExpenseCategory[]>>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
+    const { ledgerId } = req.params;
 
     const { data: categories, error } = await supabaseAdmin
       .from('expense_categories')
       .select('*')
-      .or(`created_by.eq.${userId},created_by.is.null`)
+      .eq('ledger_id', ledgerId)
       .order('name', { ascending: true });
 
     if (error) {
@@ -32,7 +32,7 @@ export const createCategory = async (
   res: Response<ApiResponse<ExpenseCategory>>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
+    const { ledgerId } = req.params;
     const { name } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -44,7 +44,7 @@ export const createCategory = async (
       .from('expense_categories')
       .select('id')
       .eq('name', name.trim())
-      .eq('created_by', userId)
+      .eq('ledger_id', ledgerId)
       .single();
 
     if (existing) {
@@ -56,7 +56,7 @@ export const createCategory = async (
       .from('expense_categories')
       .insert({
         name: name.trim(),
-        created_by: userId,
+        ledger_id: ledgerId,
       })
       .select()
       .single();
@@ -77,22 +77,17 @@ export const deleteCategory = async (
   res: Response<ApiResponse>
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
-    const { id } = req.params;
+    const { ledgerId, id } = req.params;
 
     const { data: category, error: fetchError } = await supabaseAdmin
       .from('expense_categories')
-      .select('created_by')
+      .select('ledger_id')
       .eq('id', id)
+      .eq('ledger_id', ledgerId)
       .single();
 
     if (fetchError || !category) {
       res.status(404).json({ success: false, error: 'Category not found' });
-      return;
-    }
-
-    if (category.created_by !== userId) {
-      res.status(403).json({ success: false, error: 'Cannot delete this category' });
       return;
     }
 

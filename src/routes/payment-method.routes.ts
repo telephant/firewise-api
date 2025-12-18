@@ -6,7 +6,7 @@ import {
 } from '../controllers/payment-method.controller';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router = Router({ mergeParams: true });
 
 router.use(authMiddleware);
 
