@@ -87,6 +87,122 @@ export const createCurrency = async (
   }
 };
 
+export const updateCurrency = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<Currency>>
+): Promise<void> => {
+  try {
+    const { ledgerId, id } = req.params;
+    const { code, name, rate } = req.body;
+
+    // Check if currency exists
+    const { data: existing, error: fetchError } = await supabaseAdmin
+      .from('currencies')
+      .select('*')
+      .eq('id', id)
+      .eq('ledger_id', ledgerId)
+      .single();
+
+    if (fetchError || !existing) {
+      res.status(404).json({ success: false, error: 'Currency not found' });
+      return;
+    }
+
+    // Validate inputs if provided
+    if (code !== undefined) {
+      if (typeof code !== 'string' || code.trim().length !== 3) {
+        res.status(400).json({ success: false, error: 'Valid 3-letter currency code is required' });
+        return;
+      }
+
+      // Check if another currency with the same code exists
+      const { data: duplicate } = await supabaseAdmin
+        .from('currencies')
+        .select('id')
+        .eq('code', code.toUpperCase().trim())
+        .eq('ledger_id', ledgerId)
+        .neq('id', id)
+        .single();
+
+      if (duplicate) {
+        res.status(400).json({ success: false, error: 'Currency code already exists' });
+        return;
+      }
+    }
+
+    if (name !== undefined && (typeof name !== 'string' || name.trim().length === 0)) {
+      res.status(400).json({ success: false, error: 'Currency name is required' });
+      return;
+    }
+
+    if (rate !== undefined) {
+      const rateNum = parseFloat(rate);
+      if (isNaN(rateNum) || rateNum <= 0) {
+        res.status(400).json({ success: false, error: 'Valid positive rate is required' });
+        return;
+      }
+    }
+
+    const updateData: Partial<Currency> = {};
+    if (code !== undefined) updateData.code = code.toUpperCase().trim();
+    if (name !== undefined) updateData.name = name.trim();
+    if (rate !== undefined) updateData.rate = parseFloat(rate);
+
+    const { data: currency, error } = await supabaseAdmin
+      .from('currencies')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error || !currency) {
+      throw new AppError('Failed to update currency', 500);
+    }
+
+    res.json({ success: true, data: currency });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    res.status(500).json({ success: false, error: 'Failed to update currency' });
+  }
+};
+
+export const getCurrencyUsage = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<{ count: number }>>
+): Promise<void> => {
+  try {
+    const { ledgerId, id } = req.params;
+
+    // Verify currency exists and belongs to ledger
+    const { data: currency, error: fetchError } = await supabaseAdmin
+      .from('currencies')
+      .select('id')
+      .eq('id', id)
+      .eq('ledger_id', ledgerId)
+      .single();
+
+    if (fetchError || !currency) {
+      res.status(404).json({ success: false, error: 'Currency not found' });
+      return;
+    }
+
+    // Count expenses using this currency
+    const { count, error } = await supabaseAdmin
+      .from('expenses')
+      .select('*', { count: 'exact', head: true })
+      .eq('currency_id', id);
+
+    if (error) {
+      throw new AppError('Failed to get currency usage', 500);
+    }
+
+    res.json({ success: true, data: { count: count || 0 } });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    res.status(500).json({ success: false, error: 'Failed to get currency usage' });
+  }
+};
+
 export const deleteCurrency = async (
   req: AuthenticatedRequest,
   res: Response<ApiResponse>

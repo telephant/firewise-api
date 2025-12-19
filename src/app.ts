@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/error';
+import { requestLogger } from './middleware/logger';
 
 const app = express();
 
@@ -12,11 +13,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.originalUrl}`);
-  next();
-});
+// Request/Response logging middleware
+app.use(requestLogger);
 
 // Health check
 app.get('/health', (_req, res) => {
