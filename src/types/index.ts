@@ -91,3 +91,38 @@ export interface ExpenseFilters extends PaginationParams {
   start_date?: string;
   end_date?: string;
 }
+
+// Stats types
+export interface CategoryStats {
+  category_id: string | null;
+  category_name: string;
+  amount: number;
+  percentage: number;
+}
+
+export interface ExpenseStatsResponse {
+  total: number;
+  currency_code: string;
+  currency_id: string;
+  by_category: CategoryStats[];
+  start_date: string;
+  end_date: string;
+}
+
+export interface StatsFilters {
+  start_date?: string;
+  end_date?: string;
+  currency_id?: string;
+}
+
+// Monthly stats types
+export interface MonthTotal {
+  month: string; // 'YYYY-MM' format
+  total: number;
+}
+
+export interface MonthlyStatsResponse {
+  months: MonthTotal[];
+  currency_code: string;
+  currency_id: string;
+}
