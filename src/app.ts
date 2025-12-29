@@ -7,6 +7,8 @@ import { requestLogger } from './middleware/logger';
 
 const app = express();
 
+console.log('FRONTEND_URL:', process.env.FRONTEND_URL);
+
 // Middleware
 app.use(helmet());
 app.use(cors({
