@@ -10,12 +10,33 @@ const expense_routes_1 = __importDefault(require("./expense.routes"));
 const category_routes_1 = __importDefault(require("./category.routes"));
 const currency_routes_1 = __importDefault(require("./currency.routes"));
 const payment_method_routes_1 = __importDefault(require("./payment-method.routes"));
+const stats_routes_1 = __importDefault(require("./stats.routes"));
+const asset_routes_1 = __importDefault(require("./asset.routes"));
+const flow_routes_1 = __importDefault(require("./flow.routes"));
+const flow_expense_category_routes_1 = __importDefault(require("./flow-expense-category.routes"));
+const fire_linked_ledger_routes_1 = __importDefault(require("./fire-linked-ledger.routes"));
+const fire_expense_stats_routes_1 = __importDefault(require("./fire-expense-stats.routes"));
+const stock_symbol_routes_1 = __importDefault(require("./stock-symbol.routes"));
+const stock_price_routes_1 = __importDefault(require("./stock-price.routes"));
+const feedback_routes_1 = __importDefault(require("./feedback.routes"));
 const router = (0, express_1.Router)();
+// Auth routes
 router.use('/auth', auth_routes_1.default);
+// Ledger-scoped routes (expense tracker)
 router.use('/ledgers', ledger_routes_1.default);
 router.use('/ledgers/:ledgerId/expenses', expense_routes_1.default);
 router.use('/ledgers/:ledgerId/categories', category_routes_1.default);
 router.use('/ledgers/:ledgerId/currencies', currency_routes_1.default);
 router.use('/ledgers/:ledgerId/payment-methods', payment_method_routes_1.default);
+router.use('/ledgers/:ledgerId/stats', stats_routes_1.default);
+// User-scoped routes (FIRE management) - all under /fire prefix
+router.use('/fire/assets', asset_routes_1.default);
+router.use('/fire/flows', flow_routes_1.default);
+router.use('/fire/flow-expense-categories', flow_expense_category_routes_1.default);
+router.use('/fire/linked-ledgers', fire_linked_ledger_routes_1.default);
+router.use('/fire/expense-stats', fire_expense_stats_routes_1.default);
+router.use('/fire/stock-symbols', stock_symbol_routes_1.default);
+router.use('/fire/stock-prices', stock_price_routes_1.default);
+router.use('/fire/feedback', feedback_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map

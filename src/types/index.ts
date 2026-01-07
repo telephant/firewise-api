@@ -13,7 +13,6 @@ export interface Currency {
   id: string;
   code: string;
   name: string;
-  rate: number;
   created_at: string;
 }
 
@@ -125,4 +124,90 @@ export interface MonthlyStatsResponse {
   months: MonthTotal[];
   currency_code: string;
   currency_id: string;
+}
+
+// Asset types
+export type AssetType = 'cash' | 'stock' | 'etf' | 'bond' | 'real_estate' | 'crypto' | 'debt' | 'other';
+
+export interface Asset {
+  id: string;
+  user_id: string;
+  name: string;
+  type: AssetType;
+  ticker: string | null;
+  currency: string;
+  market: string | null;
+  balance: number;
+  balance_updated_at: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Alias for backward compatibility - Asset now includes balance directly
+export type AssetWithBalance = Asset;
+
+// Flow types (Unified Flow Model)
+// Income:   [External] → [Your Asset]
+// Expense:  [Your Asset] → [External]
+// Transfer: [Your Asset] → [Your Asset]
+export type FlowType = 'income' | 'expense' | 'transfer';
+export type RecurringFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
+
+export interface Flow {
+  id: string;
+  user_id: string;
+  type: FlowType;
+  amount: number;
+  currency: string;
+  from_asset_id: string | null;
+  to_asset_id: string | null;
+  category: string | null;
+  date: string;
+  description: string | null;
+  tax_withheld: number | null;
+  recurring_frequency: RecurringFrequency | null;
+  flow_expense_category_id: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FlowWithDetails extends Flow {
+  from_asset?: Asset | null;
+  to_asset?: Asset | null;
+  flow_expense_category?: FlowExpenseCategory | null;
+}
+
+export interface FlowFilters extends PaginationParams {
+  type?: FlowType;
+  start_date?: string;
+  end_date?: string;
+  asset_id?: string;
+}
+
+export interface FlowStatsResponse {
+  total_income: number;
+  total_expense: number;
+  total_transfer: number;
+  net_flow: number;
+  currency: string;
+  start_date: string;
+  end_date: string;
+}
+
+export interface AssetFilters extends PaginationParams {
+  type?: AssetType;
+}
+
+// Flow Expense Category (FIRE-specific, separate from ledger categories)
+export interface FlowExpenseCategory {
+  id: string;
+  user_id: string;
+  name: string;
+  icon: string | null;
+  color: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 }

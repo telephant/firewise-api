@@ -7,6 +7,8 @@ const router = (0, express_1.Router)({ mergeParams: true });
 router.use(auth_1.authMiddleware);
 router.get('/', payment_method_controller_1.getPaymentMethods);
 router.post('/', payment_method_controller_1.createPaymentMethod);
+router.put('/:id', payment_method_controller_1.updatePaymentMethod);
+router.get('/:id/usage', payment_method_controller_1.getPaymentMethodUsage);
 router.delete('/:id', payment_method_controller_1.deletePaymentMethod);
 exports.default = router;
 //# sourceMappingURL=payment-method.routes.js.map

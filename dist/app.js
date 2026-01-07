@@ -8,17 +8,19 @@ const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
 const routes_1 = __importDefault(require("./routes"));
 const error_1 = require("./middleware/error");
+const logger_1 = require("./middleware/logger");
 const app = (0, express_1.default)();
+console.log('FRONTEND_URL:', process.env.FRONTEND_URL);
 // Middleware
 app.use((0, helmet_1.default)());
-app.use((0, cors_1.default)());
+app.use((0, cors_1.default)({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    credentials: true,
+}));
 app.use(express_1.default.json());
 app.use(express_1.default.urlencoded({ extended: true }));
-// Request logging middleware
-app.use((req, res, next) => {
-    console.log(`${req.method} ${req.originalUrl}`);
-    next();
-});
+// Request/Response logging middleware
+app.use(logger_1.requestLogger);
 // Health check
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

@@ -11,7 +11,7 @@ export const getCurrencies = async (
     const { ledgerId } = req.params;
 
     const { data: currencies, error } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .select('*')
       .eq('ledger_id', ledgerId)
       .order('code', { ascending: true });
@@ -34,7 +34,7 @@ export const createCurrency = async (
   try {
     const { ledgerId } = req.params;
     const userId = req.user!.id;
-    const { code, name, rate } = req.body;
+    const { code, name } = req.body;
 
     if (!code || typeof code !== 'string' || code.trim().length !== 3) {
       res.status(400).json({ success: false, error: 'Valid 3-letter currency code is required' });
@@ -46,14 +46,8 @@ export const createCurrency = async (
       return;
     }
 
-    const rateNum = parseFloat(rate);
-    if (isNaN(rateNum) || rateNum <= 0) {
-      res.status(400).json({ success: false, error: 'Valid positive rate is required' });
-      return;
-    }
-
     const { data: existing } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .select('id')
       .eq('code', code.toUpperCase().trim())
       .eq('ledger_id', ledgerId)
@@ -65,11 +59,10 @@ export const createCurrency = async (
     }
 
     const { data: currency, error } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .insert({
         code: code.toUpperCase().trim(),
         name: name.trim(),
-        rate: rateNum,
         ledger_id: ledgerId,
         created_by: userId,
       })
@@ -93,11 +86,11 @@ export const updateCurrency = async (
 ): Promise<void> => {
   try {
     const { ledgerId, id } = req.params;
-    const { code, name, rate } = req.body;
+    const { code, name } = req.body;
 
     // Check if currency exists
     const { data: existing, error: fetchError } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .select('*')
       .eq('id', id)
       .eq('ledger_id', ledgerId)
@@ -117,7 +110,7 @@ export const updateCurrency = async (
 
       // Check if another currency with the same code exists
       const { data: duplicate } = await supabaseAdmin
-        .from('currencies')
+        .from('ledger_currencies')
         .select('id')
         .eq('code', code.toUpperCase().trim())
         .eq('ledger_id', ledgerId)
@@ -135,21 +128,12 @@ export const updateCurrency = async (
       return;
     }
 
-    if (rate !== undefined) {
-      const rateNum = parseFloat(rate);
-      if (isNaN(rateNum) || rateNum <= 0) {
-        res.status(400).json({ success: false, error: 'Valid positive rate is required' });
-        return;
-      }
-    }
-
     const updateData: Partial<Currency> = {};
     if (code !== undefined) updateData.code = code.toUpperCase().trim();
     if (name !== undefined) updateData.name = name.trim();
-    if (rate !== undefined) updateData.rate = parseFloat(rate);
 
     const { data: currency, error } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .update(updateData)
       .eq('id', id)
       .select()
@@ -175,7 +159,7 @@ export const getCurrencyUsage = async (
 
     // Verify currency exists and belongs to ledger
     const { data: currency, error: fetchError } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .select('id')
       .eq('id', id)
       .eq('ledger_id', ledgerId)
@@ -211,7 +195,7 @@ export const deleteCurrency = async (
     const { ledgerId, id } = req.params;
 
     const { data: currency, error: fetchError } = await supabaseAdmin
-      .from('currencies')
+      .from('ledger_currencies')
       .select('ledger_id')
       .eq('id', id)
       .eq('ledger_id', ledgerId)
@@ -222,7 +206,7 @@ export const deleteCurrency = async (
       return;
     }
 
-    const { error } = await supabaseAdmin.from('currencies').delete().eq('id', id);
+    const { error } = await supabaseAdmin.from('ledger_currencies').delete().eq('id', id);
 
     if (error) {
       throw new AppError('Failed to delete currency', 500);

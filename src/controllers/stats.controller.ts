@@ -32,10 +32,10 @@ export const getExpenseStats = async (
       return;
     }
 
-    // 2. Get all currencies for this ledger (needed for conversion)
+    // 2. Get all currencies for this ledger
     const { data: currencies, error: currError } = await supabaseAdmin
-      .from('currencies')
-      .select('id, code, name, rate')
+      .from('ledger_currencies')
+      .select('id, code, name')
       .eq('ledger_id', ledgerId);
 
     if (currError || !currencies || currencies.length === 0) {
@@ -71,11 +71,27 @@ export const getExpenseStats = async (
         currencies[0];
     }
 
-    // 4. Build currency rate map
+    // 4. Get exchange rates from currency_exchange table
+    const currencyCodes = currencies.map((c) => c.code.toLowerCase());
+    const { data: exchangeRates } = await supabaseAdmin
+      .from('currency_exchange')
+      .select('code, rate')
+      .in('code', currencyCodes);
+
+    // Build rate map: currency_id -> rate (from currency_exchange)
+    const codeToRateMap: Record<string, number> = {};
+    (exchangeRates || []).forEach((er) => {
+      codeToRateMap[er.code] = er.rate;
+    });
+
     const currencyRateMap: Record<string, number> = {};
     currencies.forEach((c) => {
-      currencyRateMap[c.id] = c.rate;
+      // Rate from currency_exchange (1 USD = X currency), default to 1 if not found
+      currencyRateMap[c.id] = codeToRateMap[c.code.toLowerCase()] || 1;
     });
+
+    // Get target currency rate
+    const targetRate = codeToRateMap[targetCurrency.code.toLowerCase()] || 1;
 
     // 5. Query expenses with date filters
     let query = supabaseAdmin.from('expenses').select('category_id, amount, currency_id').eq('ledger_id', ledgerId);
@@ -109,7 +125,6 @@ export const getExpenseStats = async (
         currency_id: string;
       }) => {
         const sourceRate = currencyRateMap[expense.currency_id] || 1;
-        const targetRate = targetCurrency!.rate;
 
         // Convert: amount / sourceRate * targetRate
         const convertedAmount = (expense.amount / sourceRate) * targetRate;
@@ -180,8 +195,8 @@ export const getMonthlyStats = async (
 
     // 2. Get all currencies for this ledger
     const { data: currencies, error: currError } = await supabaseAdmin
-      .from('currencies')
-      .select('id, code, name, rate')
+      .from('ledger_currencies')
+      .select('id, code, name')
       .eq('ledger_id', ledgerId);
 
     if (currError || !currencies || currencies.length === 0) {
@@ -212,11 +227,26 @@ export const getMonthlyStats = async (
         currencies[0];
     }
 
-    // 4. Build currency rate map
+    // 4. Get exchange rates from currency_exchange table
+    const currencyCodes = currencies.map((c) => c.code.toLowerCase());
+    const { data: exchangeRates } = await supabaseAdmin
+      .from('currency_exchange')
+      .select('code, rate')
+      .in('code', currencyCodes);
+
+    // Build rate map: currency_id -> rate (from currency_exchange)
+    const codeToRateMap: Record<string, number> = {};
+    (exchangeRates || []).forEach((er) => {
+      codeToRateMap[er.code] = er.rate;
+    });
+
     const currencyRateMap: Record<string, number> = {};
     currencies.forEach((c) => {
-      currencyRateMap[c.id] = c.rate;
+      currencyRateMap[c.id] = codeToRateMap[c.code.toLowerCase()] || 1;
     });
+
+    // Get target currency rate
+    const targetRate = codeToRateMap[targetCurrency.code.toLowerCase()] || 1;
 
     // 5. Calculate date range for last N months
     const now = new Date();
@@ -246,7 +276,6 @@ export const getMonthlyStats = async (
       const monthKey = `${expenseDate.getFullYear()}-${String(expenseDate.getMonth() + 1).padStart(2, '0')}`;
 
       const sourceRate = currencyRateMap[expense.currency_id] || 1;
-      const targetRate = targetCurrency!.rate;
       const convertedAmount = (expense.amount / sourceRate) * targetRate;
 
       monthlyTotals[monthKey] = (monthlyTotals[monthKey] || 0) + convertedAmount;

@@ -49,7 +49,7 @@ const getExpenses = async (req, res) => {
                 ? supabase_1.supabaseAdmin.from('expense_categories').select('id, name').in('id', categoryIds)
                 : { data: [] },
             currencyIds.length > 0
-                ? supabase_1.supabaseAdmin.from('currencies').select('id, code, name').in('id', currencyIds)
+                ? supabase_1.supabaseAdmin.from('ledger_currencies').select('id, code, name').in('id', currencyIds)
                 : { data: [] },
             paymentMethodIds.length > 0
                 ? supabase_1.supabaseAdmin.from('payment_methods').select('id, name').in('id', paymentMethodIds)
@@ -113,7 +113,7 @@ const getExpense = async (req, res) => {
                 ? supabase_1.supabaseAdmin.from('expense_categories').select('id, name').eq('id', expense.category_id).single()
                 : { data: null },
             expense.currency_id
-                ? supabase_1.supabaseAdmin.from('currencies').select('id, code, name').eq('id', expense.currency_id).single()
+                ? supabase_1.supabaseAdmin.from('ledger_currencies').select('id, code, name').eq('id', expense.currency_id).single()
                 : { data: null },
             expense.payment_method_id
                 ? supabase_1.supabaseAdmin.from('payment_methods').select('id, name').eq('id', expense.payment_method_id).single()
