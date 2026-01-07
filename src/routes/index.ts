@@ -4,6 +4,7 @@ import ledgerRoutes from './ledger.routes';
 import expenseRoutes from './expense.routes';
 import categoryRoutes from './category.routes';
 import currencyRoutes from './currency.routes';
+import currencyExchangeRoutes from './currency-exchange.routes';
 import paymentMethodRoutes from './payment-method.routes';
 import statsRoutes from './stats.routes';
 import assetRoutes from './asset.routes';
@@ -19,6 +20,9 @@ const router = Router();
 
 // Auth routes
 router.use('/auth', authRoutes);
+
+// Global currency exchange search (not ledger-scoped)
+router.use('/currency-exchange', currencyExchangeRoutes);
 
 // Ledger-scoped routes (expense tracker)
 router.use('/ledgers', ledgerRoutes);

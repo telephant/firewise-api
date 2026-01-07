@@ -9,6 +9,7 @@ const ledger_routes_1 = __importDefault(require("./ledger.routes"));
 const expense_routes_1 = __importDefault(require("./expense.routes"));
 const category_routes_1 = __importDefault(require("./category.routes"));
 const currency_routes_1 = __importDefault(require("./currency.routes"));
+const currency_exchange_routes_1 = __importDefault(require("./currency-exchange.routes"));
 const payment_method_routes_1 = __importDefault(require("./payment-method.routes"));
 const stats_routes_1 = __importDefault(require("./stats.routes"));
 const asset_routes_1 = __importDefault(require("./asset.routes"));
@@ -22,6 +23,8 @@ const feedback_routes_1 = __importDefault(require("./feedback.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
+// Global currency exchange search (not ledger-scoped)
+router.use('/currency-exchange', currency_exchange_routes_1.default);
 // Ledger-scoped routes (expense tracker)
 router.use('/ledgers', ledger_routes_1.default);
 router.use('/ledgers/:ledgerId/expenses', expense_routes_1.default);
