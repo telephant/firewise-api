@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getMonthlyStats = exports.getExpenseStats = void 0;
+exports.getFrequentExpenses = exports.getMonthlyStats = exports.getExpenseStats = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
 const getExpenseStats = async (req, res) => {
@@ -275,4 +275,71 @@ const getMonthlyStats = async (req, res) => {
     }
 };
 exports.getMonthlyStats = getMonthlyStats;
+// Get top 5 most frequent expense names in the last 30 days
+const getFrequentExpenses = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { ledgerId } = req.params;
+        // 1. Authorization check
+        const { data: ledgerUser, error: luError } = await supabase_1.supabaseAdmin
+            .from('ledger_users')
+            .select('role')
+            .eq('ledger_id', ledgerId)
+            .eq('user_id', userId)
+            .single();
+        if (luError || !ledgerUser) {
+            res.status(404).json({ success: false, error: 'Ledger not found' });
+            return;
+        }
+        // 2. Calculate date range for last 30 days
+        const now = new Date();
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const startDateStr = thirtyDaysAgo.toISOString().split('T')[0];
+        // 3. Query expenses from the last 30 days
+        const { data: expenses, error: expError } = await supabase_1.supabaseAdmin
+            .from('expenses')
+            .select('name, category_id')
+            .eq('ledger_id', ledgerId)
+            .gte('date', startDateStr);
+        if (expError) {
+            throw new error_1.AppError('Failed to fetch expense data', 500);
+        }
+        // 4. Count frequency by name (case-insensitive)
+        const frequencyMap = {};
+        (expenses || []).forEach((expense) => {
+            const key = expense.name.toLowerCase().trim();
+            if (frequencyMap[key]) {
+                frequencyMap[key].count++;
+                // Keep the most recent category_id
+                if (expense.category_id) {
+                    frequencyMap[key].category_id = expense.category_id;
+                }
+            }
+            else {
+                frequencyMap[key] = {
+                    name: expense.name,
+                    category_id: expense.category_id,
+                    count: 1,
+                };
+            }
+        });
+        // 5. Sort by count descending and take top 5
+        const topExpenses = Object.values(frequencyMap)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 5);
+        res.json({
+            success: true,
+            data: {
+                expenses: topExpenses,
+            },
+        });
+    }
+    catch (err) {
+        if (err instanceof error_1.AppError)
+            throw err;
+        console.error('Frequent expenses error:', err);
+        res.status(500).json({ success: false, error: 'Failed to fetch frequent expenses' });
+    }
+};
+exports.getFrequentExpenses = getFrequentExpenses;
 //# sourceMappingURL=stats.controller.js.map

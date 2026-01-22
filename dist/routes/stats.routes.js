@@ -7,5 +7,6 @@ const router = (0, express_1.Router)({ mergeParams: true });
 router.use(auth_1.authMiddleware);
 router.get('/', stats_controller_1.getExpenseStats);
 router.get('/monthly', stats_controller_1.getMonthlyStats);
+router.get('/frequent', stats_controller_1.getFrequentExpenses);
 exports.default = router;
 //# sourceMappingURL=stats.routes.js.map

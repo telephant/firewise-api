@@ -31,7 +31,12 @@ async function fetchStockPrice(symbol: string): Promise<{ price: number; currenc
 
     if (!response.ok) return null;
 
-    const data = await response.json();
+    const data = await response.json() as {
+      chart?: {
+        error?: unknown;
+        result?: Array<{ meta: { regularMarketPrice: number; currency?: string } }>;
+      };
+    };
     if (data.chart?.error || !data.chart?.result?.[0]) return null;
 
     const meta = data.chart.result[0].meta;

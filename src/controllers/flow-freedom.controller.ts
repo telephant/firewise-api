@@ -56,6 +56,8 @@ interface FlowFreedomResponse {
     hasPassiveIncome: boolean; // Any unreviewed passive income flows
     hasExpenses: boolean; // Any unreviewed expense flows
   };
+  // Currency all values are converted to
+  currency: string;
 }
 
 /**

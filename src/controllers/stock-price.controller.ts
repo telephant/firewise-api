@@ -17,9 +17,9 @@ interface YahooChartResponse {
 interface StockPrice {
   symbol: string;
   price: number;
-  previousClose: number;
-  change: number;
-  changePercent: number;
+  previousClose: number | null;
+  change: number | null;
+  changePercent: number | null;
   currency: string;
 }
 
