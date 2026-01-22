@@ -340,3 +340,79 @@ export const getMonthlyStats = async (
     res.status(500).json({ success: false, error: 'Failed to fetch monthly stats' });
   }
 };
+
+// Get top 5 most frequent expense names in the last 30 days
+export const getFrequentExpenses = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<{ expenses: { name: string; category_id: string | null; count: number }[] }>>
+): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const { ledgerId } = req.params;
+
+    // 1. Authorization check
+    const { data: ledgerUser, error: luError } = await supabaseAdmin
+      .from('ledger_users')
+      .select('role')
+      .eq('ledger_id', ledgerId)
+      .eq('user_id', userId)
+      .single();
+
+    if (luError || !ledgerUser) {
+      res.status(404).json({ success: false, error: 'Ledger not found' });
+      return;
+    }
+
+    // 2. Calculate date range for last 30 days
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const startDateStr = thirtyDaysAgo.toISOString().split('T')[0];
+
+    // 3. Query expenses from the last 30 days
+    const { data: expenses, error: expError } = await supabaseAdmin
+      .from('expenses')
+      .select('name, category_id')
+      .eq('ledger_id', ledgerId)
+      .gte('date', startDateStr);
+
+    if (expError) {
+      throw new AppError('Failed to fetch expense data', 500);
+    }
+
+    // 4. Count frequency by name (case-insensitive)
+    const frequencyMap: Record<string, { name: string; category_id: string | null; count: number }> = {};
+
+    (expenses || []).forEach((expense: { name: string; category_id: string | null }) => {
+      const key = expense.name.toLowerCase().trim();
+      if (frequencyMap[key]) {
+        frequencyMap[key].count++;
+        // Keep the most recent category_id
+        if (expense.category_id) {
+          frequencyMap[key].category_id = expense.category_id;
+        }
+      } else {
+        frequencyMap[key] = {
+          name: expense.name,
+          category_id: expense.category_id,
+          count: 1,
+        };
+      }
+    });
+
+    // 5. Sort by count descending and take top 5
+    const topExpenses = Object.values(frequencyMap)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    res.json({
+      success: true,
+      data: {
+        expenses: topExpenses,
+      },
+    });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    console.error('Frequent expenses error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch frequent expenses' });
+  }
+};
