@@ -6,13 +6,22 @@
  *
  * Available tasks:
  * - update-currency: Fetch and update exchange rates from external API
+ * - check-dividends: Check for dividend payments and create flows
+ * - process-recurring: Process due recurring schedules and create flows
+ * - update-growth-rates: Fetch 5yr/10yr growth rates for assets with tickers
  */
 
 import { UpdateCurrencyTask } from './update-currency.task';
+import { CheckDividendsTask } from './check-dividends.task';
+import { ProcessRecurringTask } from './process-recurring.task';
+import { UpdateGrowthRatesTask } from './update-growth-rates.task';
 
 // Registry of all available tasks
 const TASKS: Record<string, () => Promise<void>> = {
   'update-currency': () => new UpdateCurrencyTask().run(),
+  'check-dividends': () => new CheckDividendsTask().run(),
+  'process-recurring': () => new ProcessRecurringTask().run(),
+  'update-growth-rates': () => new UpdateGrowthRatesTask().run(),
 };
 
 async function main() {

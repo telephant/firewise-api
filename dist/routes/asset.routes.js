@@ -9,6 +9,7 @@ router.use(auth_1.authMiddleware);
 // Asset routes (user-scoped, not ledger-scoped)
 router.get('/', asset_controller_1.getAssets);
 router.post('/', asset_controller_1.createAsset);
+router.get('/stats/net-worth', asset_controller_1.getNetWorthStats); // Must be before /:id
 router.get('/:id', asset_controller_1.getAsset);
 router.put('/:id', asset_controller_1.updateAsset);
 router.delete('/:id', asset_controller_1.deleteAsset);

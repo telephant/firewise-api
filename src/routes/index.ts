@@ -15,6 +15,14 @@ import fireExpenseStatsRoutes from './fire-expense-stats.routes';
 import stockSymbolRoutes from './stock-symbol.routes';
 import stockPriceRoutes from './stock-price.routes';
 import feedbackRoutes from './feedback.routes';
+import userTaxSettingsRoutes from './user-tax-settings.routes';
+import assetInterestSettingsRoutes from './asset-interest-settings.routes';
+import userPreferencesRoutes from './user-preferences.routes';
+import debtRoutes from './debt.routes';
+import recurringScheduleRoutes from './recurring-schedule.routes';
+import flowFreedomRoutes from './flow-freedom.routes';
+import runwayRoutes from './runway.routes';
+import assetImportRoutes from './asset-import.routes';
 
 const router = Router();
 
@@ -41,5 +49,13 @@ router.use('/fire/expense-stats', fireExpenseStatsRoutes);
 router.use('/fire/stock-symbols', stockSymbolRoutes);
 router.use('/fire/stock-prices', stockPriceRoutes);
 router.use('/fire/feedback', feedbackRoutes);
+router.use('/fire/tax-settings', userTaxSettingsRoutes);
+router.use('/fire/asset-interest-settings', assetInterestSettingsRoutes);
+router.use('/fire/user-preferences', userPreferencesRoutes);
+router.use('/fire/debts', debtRoutes);
+router.use('/fire/recurring-schedules', recurringScheduleRoutes);
+router.use('/fire/flow-freedom', flowFreedomRoutes);
+router.use('/fire/runway', runwayRoutes);
+router.use('/fire/assets/import', assetImportRoutes);
 
 export default router;

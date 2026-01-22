@@ -1,11 +1,101 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getAssets = void 0;
+exports.getNetWorthStats = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getAssets = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
+const currency_conversion_1 = require("../utils/currency-conversion");
+// Cache for stock prices (5 minute TTL)
+const stockPriceCache = new Map();
+const STOCK_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+/**
+ * Fetch stock price from Yahoo Finance
+ */
+async function fetchStockPrice(symbol) {
+    try {
+        // Check cache first
+        const cached = stockPriceCache.get(symbol);
+        if (cached && Date.now() - cached.timestamp < STOCK_CACHE_TTL) {
+            return { price: cached.price, currency: cached.currency };
+        }
+        const now = Math.floor(Date.now() / 1000);
+        const oneDayAgo = now - 86400;
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${oneDayAgo}&period2=${now}&interval=1d`;
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            },
+        });
+        if (!response.ok)
+            return null;
+        const data = await response.json();
+        if (data.chart?.error || !data.chart?.result?.[0])
+            return null;
+        const meta = data.chart.result[0].meta;
+        const price = meta.regularMarketPrice;
+        const currency = meta.currency || 'USD';
+        // Cache the result
+        stockPriceCache.set(symbol, { price, currency, timestamp: Date.now() });
+        return { price, currency };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Add stock prices and converted values to stock/ETF assets
+ * Balance remains as shares, but we calculate and convert market_value
+ */
+async function addStockPricesAndConversion(assets, preferredCurrency) {
+    // Find all stock/ETF assets with tickers
+    const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+    const tickers = [...new Set(stockAssets.map(a => a.ticker))];
+    // Fetch all stock prices in parallel
+    const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+    const priceResults = await Promise.all(pricePromises);
+    // Create price map
+    const priceMap = new Map();
+    tickers.forEach((ticker, index) => {
+        if (priceResults[index]) {
+            priceMap.set(ticker, priceResults[index]);
+        }
+    });
+    // Collect all currencies for exchange rate conversion
+    const currencies = new Set([preferredCurrency.toLowerCase()]);
+    priceResults.forEach(result => {
+        if (result)
+            currencies.add(result.currency.toLowerCase());
+    });
+    assets.forEach(a => {
+        if (a.currency)
+            currencies.add(a.currency.toLowerCase());
+    });
+    // Get exchange rates
+    const rateMap = await (0, currency_conversion_1.getExchangeRates)(Array.from(currencies));
+    // Add stock_price, market_value, and converted_balance to assets
+    return assets.map(asset => {
+        if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
+            const stockPrice = priceMap.get(asset.ticker);
+            if (stockPrice) {
+                // Calculate market value in stock's currency
+                const marketValue = asset.balance * stockPrice.price;
+                // Convert to user's preferred currency
+                const conversion = (0, currency_conversion_1.convertAmount)(marketValue, stockPrice.currency, preferredCurrency, rateMap);
+                return {
+                    ...asset,
+                    stock_price: stockPrice.price,
+                    stock_currency: stockPrice.currency,
+                    market_value: marketValue,
+                    converted_balance: conversion ? Math.round(conversion.converted * 100) / 100 : marketValue,
+                    converted_currency: preferredCurrency,
+                };
+            }
+        }
+        return asset;
+    });
+}
 /**
  * Get all assets for the authenticated user
- * Balance is stored in the database and updated when flows change
+ * Balance is stored in the database and managed by the application
  */
 const getAssets = async (req, res) => {
     try {
@@ -28,10 +118,24 @@ const getAssets = async (req, res) => {
         if (error) {
             throw new error_1.AppError('Failed to fetch assets', 500);
         }
+        // Get user preferences for currency
+        const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = prefs?.preferred_currency || 'USD';
+        // Add stock prices and convert to preferred currency for stock/ETF assets
+        const assetsWithStockPrices = await addStockPricesAndConversion(assets || [], preferredCurrency);
+        // Add currency conversion fields for non-stock assets
+        // Stock assets already have converted_balance from addStockPricesAndConversion
+        const assetsWithConversion = await (0, currency_conversion_1.addConvertedFieldsToArray)(assetsWithStockPrices.map(a => {
+            // For stock/ETF: skip balance conversion (already handled above)
+            if ((a.type === 'stock' || a.type === 'etf') && a.stock_price) {
+                return { ...a, skip_balance_conversion: true };
+            }
+            return a;
+        }), userId);
         res.json({
             success: true,
             data: {
-                assets: assets || [],
+                assets: assetsWithConversion,
                 total: count || 0,
             },
         });
@@ -45,7 +149,6 @@ const getAssets = async (req, res) => {
 exports.getAssets = getAssets;
 /**
  * Get a single asset by ID
- * Balance is stored in the database
  */
 const getAsset = async (req, res) => {
     try {
@@ -61,9 +164,19 @@ const getAsset = async (req, res) => {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
         }
+        // Get user preferences for currency
+        const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = prefs?.preferred_currency || 'USD';
+        // Add stock price and convert to preferred currency for stock/ETF assets
+        const [assetWithStockPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
+        // Add currency conversion fields (skip for stocks - already handled above)
+        const assetWithConversion = await (0, currency_conversion_1.addConvertedFieldsToSingle)({
+            ...assetWithStockPrice,
+            skip_balance_conversion: (asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price ? true : undefined,
+        }, userId);
         res.json({
             success: true,
-            data: asset,
+            data: assetWithConversion,
         });
     }
     catch (err) {
@@ -89,7 +202,7 @@ const createAsset = async (req, res) => {
             res.status(400).json({ success: false, error: 'Asset type is required' });
             return;
         }
-        const validTypes = ['cash', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'debt', 'other'];
+        const validTypes = ['cash', 'deposit', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'other'];
         if (!validTypes.includes(type)) {
             res.status(400).json({ success: false, error: 'Invalid asset type' });
             return;
@@ -130,7 +243,7 @@ const updateAsset = async (req, res) => {
     try {
         const userId = req.user.id;
         const { id } = req.params;
-        const { name, type, ticker, currency, market, metadata } = req.body;
+        const { name, type, ticker, currency, market, metadata, balance } = req.body;
         // Check if asset exists and belongs to user
         const { data: existingAsset, error: fetchError } = await supabase_1.supabaseAdmin
             .from('assets')
@@ -142,7 +255,6 @@ const updateAsset = async (req, res) => {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
         }
-        // Note: balance is calculated from flows, not stored in the database
         const updates = { updated_at: new Date().toISOString() };
         if (name !== undefined)
             updates.name = name.trim();
@@ -156,6 +268,10 @@ const updateAsset = async (req, res) => {
             updates.market = market || null;
         if (metadata !== undefined)
             updates.metadata = metadata;
+        if (balance !== undefined) {
+            updates.balance = parseFloat(balance);
+            updates.balance_updated_at = new Date().toISOString();
+        }
         const { data: asset, error } = await supabase_1.supabaseAdmin
             .from('assets')
             .update(updates)
@@ -225,4 +341,102 @@ const deleteAsset = async (req, res) => {
     }
 };
 exports.deleteAsset = deleteAsset;
+/**
+ * Get net worth statistics (total assets, debts, net worth)
+ * All values converted to user's preferred currency
+ */
+const getNetWorthStats = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        // Get user preferences for currency
+        const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = prefs?.preferred_currency || 'USD';
+        // Fetch all assets and debts in parallel
+        const [assetsResult, debtsResult] = await Promise.all([
+            supabase_1.supabaseAdmin
+                .from('assets')
+                .select('id, type, ticker, balance, currency')
+                .eq('user_id', userId),
+            supabase_1.supabaseAdmin
+                .from('debts')
+                .select('id, current_balance, currency, status')
+                .eq('user_id', userId)
+                .eq('status', 'active'),
+        ]);
+        if (assetsResult.error) {
+            throw new error_1.AppError('Failed to fetch assets', 500);
+        }
+        if (debtsResult.error) {
+            throw new error_1.AppError('Failed to fetch debts', 500);
+        }
+        const assets = assetsResult.data || [];
+        const debts = debtsResult.data || [];
+        // Find stock/ETF assets and fetch prices
+        const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+        const tickers = [...new Set(stockAssets.map(a => a.ticker))];
+        const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+        const priceResults = await Promise.all(pricePromises);
+        const priceMap = new Map();
+        tickers.forEach((ticker, index) => {
+            if (priceResults[index]) {
+                priceMap.set(ticker, priceResults[index]);
+            }
+        });
+        // Collect all currencies for exchange rates
+        const currencies = new Set([preferredCurrency.toLowerCase()]);
+        assets.forEach(a => currencies.add((a.currency || 'USD').toLowerCase()));
+        debts.forEach(d => currencies.add((d.currency || 'USD').toLowerCase()));
+        priceResults.forEach(result => {
+            if (result)
+                currencies.add(result.currency.toLowerCase());
+        });
+        const rateMap = await (0, currency_conversion_1.getExchangeRates)(Array.from(currencies));
+        // Calculate total assets (converted to preferred currency)
+        let totalAssets = 0;
+        for (const asset of assets) {
+            let value;
+            let valueCurrency;
+            if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
+                const price = priceMap.get(asset.ticker);
+                if (price) {
+                    value = asset.balance * price.price;
+                    valueCurrency = price.currency;
+                }
+                else {
+                    continue; // Skip if no price available
+                }
+            }
+            else {
+                value = asset.balance;
+                valueCurrency = asset.currency || 'USD';
+            }
+            // Convert to preferred currency
+            const conversion = (0, currency_conversion_1.convertAmount)(value, valueCurrency, preferredCurrency, rateMap);
+            totalAssets += conversion ? conversion.converted : value;
+        }
+        // Calculate total debts (converted to preferred currency)
+        let totalDebts = 0;
+        for (const debt of debts) {
+            const value = debt.current_balance;
+            const valueCurrency = debt.currency || 'USD';
+            const conversion = (0, currency_conversion_1.convertAmount)(value, valueCurrency, preferredCurrency, rateMap);
+            totalDebts += conversion ? conversion.converted : value;
+        }
+        res.json({
+            success: true,
+            data: {
+                totalAssets: Math.round(totalAssets * 100) / 100,
+                totalDebts: Math.round(totalDebts * 100) / 100,
+                netWorth: Math.round((totalAssets - totalDebts) * 100) / 100,
+                currency: preferredCurrency,
+            },
+        });
+    }
+    catch (err) {
+        if (err instanceof error_1.AppError)
+            throw err;
+        res.status(500).json({ success: false, error: 'Failed to calculate net worth' });
+    }
+};
+exports.getNetWorthStats = getNetWorthStats;
 //# sourceMappingURL=asset.controller.js.map

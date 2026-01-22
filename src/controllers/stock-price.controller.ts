@@ -133,13 +133,15 @@ async function fetchStockPrice(symbol: string): Promise<StockPrice | null> {
     const meta = data.chart.result[0].meta;
     const price = meta.regularMarketPrice;
     const previousClose = meta.previousClose;
-    const change = price - previousClose;
-    const changePercent = (change / previousClose) * 100;
+
+    // Calculate change only if previousClose is available
+    const change = previousClose ? price - previousClose : null;
+    const changePercent = previousClose ? ((price - previousClose) / previousClose) * 100 : null;
 
     return {
       symbol,
       price,
-      previousClose,
+      previousClose: previousClose || null,
       change,
       changePercent,
       currency: meta.currency || 'USD',

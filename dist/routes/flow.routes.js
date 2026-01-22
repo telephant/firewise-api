@@ -8,10 +8,12 @@ const router = (0, express_1.Router)();
 router.use(auth_1.authMiddleware);
 // Flow routes (user-scoped, not ledger-scoped)
 router.get('/stats', flow_controller_1.getFlowStats); // Must be before /:id to avoid conflict
+router.get('/review-count', flow_controller_1.getFlowsNeedingReviewCount); // Must be before /:id to avoid conflict
 router.get('/', flow_controller_1.getFlows);
 router.post('/', flow_controller_1.createFlow);
 router.get('/:id', flow_controller_1.getFlow);
 router.put('/:id', flow_controller_1.updateFlow);
+router.patch('/:id/review', flow_controller_1.markFlowReviewed);
 router.delete('/:id', flow_controller_1.deleteFlow);
 exports.default = router;
 //# sourceMappingURL=flow.routes.js.map

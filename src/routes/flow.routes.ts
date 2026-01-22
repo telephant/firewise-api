@@ -7,6 +7,8 @@ import {
   updateFlow,
   deleteFlow,
   getFlowStats,
+  markFlowReviewed,
+  getFlowsNeedingReviewCount,
 } from '../controllers/flow.controller';
 
 const router = Router();
@@ -16,10 +18,12 @@ router.use(authMiddleware);
 
 // Flow routes (user-scoped, not ledger-scoped)
 router.get('/stats', getFlowStats); // Must be before /:id to avoid conflict
+router.get('/review-count', getFlowsNeedingReviewCount); // Must be before /:id to avoid conflict
 router.get('/', getFlows);
 router.post('/', createFlow);
 router.get('/:id', getFlow);
 router.put('/:id', updateFlow);
+router.patch('/:id/review', markFlowReviewed);
 router.delete('/:id', deleteFlow);
 
 export default router;

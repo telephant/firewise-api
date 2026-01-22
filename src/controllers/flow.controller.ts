@@ -9,11 +9,14 @@ import {
   FlowStatsResponse,
   Asset,
   FlowExpenseCategory,
+  FlowTemplate,
+  ScheduleFrequency,
 } from '../types';
 import { AppError } from '../middleware/error';
+import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
-// Note: Asset balances are automatically updated by database trigger
-// See migration 020_add_flow_balance_trigger.sql
+// Note: Asset/debt balances are managed explicitly by the application
+// Balance triggers were removed in migration 034_remove_balance_triggers.sql
 
 /**
  * Get all flows for the authenticated user
@@ -31,10 +34,12 @@ export const getFlows = async (
       start_date,
       end_date,
       asset_id,
-    } = req.query as unknown as FlowFilters & { page: string; limit: string };
+      needs_review,
+      exclude_category,
+    } = req.query as unknown as FlowFilters & { page: string; limit: string; needs_review?: string; exclude_category?: string };
 
     const pageNum = parseInt(page as string, 10) || 1;
-    const limitNum = Math.min(parseInt(limit as string, 10) || 20, 100);
+    const limitNum = Math.min(parseInt(limit as string, 10) || 20, 500); // Increased max limit
     const offset = (pageNum - 1) * limitNum;
 
     // Build query
@@ -51,6 +56,8 @@ export const getFlows = async (
     if (asset_id) {
       query = query.or(`from_asset_id.eq.${asset_id},to_asset_id.eq.${asset_id}`);
     }
+    if (needs_review === 'true') query = query.eq('needs_review', true);
+    if (exclude_category) query = query.neq('category', exclude_category);
 
     query = query.range(offset, offset + limitNum - 1);
 
@@ -89,10 +96,13 @@ export const getFlows = async (
       flow_expense_category: flow.flow_expense_category_id ? categoryMap.get(flow.flow_expense_category_id) || null : null,
     }));
 
+    // Add currency conversion fields if user has convert_all_to_preferred enabled
+    const flowsWithConversion = await addConvertedFieldsToArray(flowsWithDetails, userId);
+
     res.json({
       success: true,
       data: {
-        flows: flowsWithDetails,
+        flows: flowsWithConversion,
         total: count || 0,
       },
     });
@@ -138,14 +148,19 @@ export const getFlow = async (
         : { data: null },
     ]);
 
+    const flowWithDetails = {
+      ...flow,
+      from_asset: fromAsset.data || null,
+      to_asset: toAsset.data || null,
+      flow_expense_category: expenseCategory.data || null,
+    };
+
+    // Add currency conversion fields if user has convert_all_to_preferred enabled
+    const flowWithConversion = await addConvertedFieldsToSingle(flowWithDetails, userId);
+
     res.json({
       success: true,
-      data: {
-        ...flow,
-        from_asset: fromAsset.data || null,
-        to_asset: toAsset.data || null,
-        flow_expense_category: expenseCategory.data || null,
-      },
+      data: flowWithConversion,
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -156,7 +171,7 @@ export const getFlow = async (
 /**
  * Create a new flow
  * Validates flow type constraints:
- * - income: from_asset_id must be null, to_asset_id must exist
+ * - income: to_asset_id must exist, from_asset_id optional (e.g., for dividends linking to stock)
  * - expense: from_asset_id must exist, to_asset_id must be null
  * - transfer: both from_asset_id and to_asset_id must exist
  */
@@ -172,18 +187,20 @@ export const createFlow = async (
       currency,
       from_asset_id,
       to_asset_id,
+      debt_id,
       category,
       date,
       description,
-      tax_withheld,
       recurring_frequency,
       flow_expense_category_id,
       metadata,
+      needs_review,
+      adjust_balances, // If true, adjusts related asset balances with currency conversion
     } = req.body;
 
     // Validate required fields
-    if (!type || !['income', 'expense', 'transfer'].includes(type)) {
-      res.status(400).json({ success: false, error: 'Valid flow type is required (income, expense, transfer)' });
+    if (!type || !['income', 'expense', 'transfer', 'other'].includes(type)) {
+      res.status(400).json({ success: false, error: 'Valid flow type is required (income, expense, transfer, other)' });
       return;
     }
 
@@ -200,11 +217,8 @@ export const createFlow = async (
     }
 
     // Validate flow type constraints
+    // Income: to_asset_id required, from_asset_id optional (e.g., dividends can link to stock)
     if (type === 'income') {
-      if (from_asset_id) {
-        res.status(400).json({ success: false, error: 'Income flows cannot have a from_asset_id' });
-        return;
-      }
       if (!to_asset_id) {
         res.status(400).json({ success: false, error: 'Income flows must have a to_asset_id' });
         return;
@@ -229,13 +243,16 @@ export const createFlow = async (
       }
     }
 
-    // Verify assets and expense category belong to user (parallel checks)
-    const [fromAssetResult, toAssetResult, expenseCategoryResult] = await Promise.all([
+    // Verify assets, debt, and expense category belong to user (parallel checks)
+    const [fromAssetResult, toAssetResult, debtResult, expenseCategoryResult] = await Promise.all([
       from_asset_id
         ? supabaseAdmin.from('assets').select('id').eq('id', from_asset_id).eq('user_id', userId).single()
         : Promise.resolve({ data: { id: null } }),
       to_asset_id
         ? supabaseAdmin.from('assets').select('id').eq('id', to_asset_id).eq('user_id', userId).single()
+        : Promise.resolve({ data: { id: null } }),
+      debt_id
+        ? supabaseAdmin.from('debts').select('id').eq('id', debt_id).eq('user_id', userId).single()
         : Promise.resolve({ data: { id: null } }),
       flow_expense_category_id
         ? supabaseAdmin.from('flow_expense_categories').select('id').eq('id', flow_expense_category_id).eq('user_id', userId).single()
@@ -252,11 +269,57 @@ export const createFlow = async (
       return;
     }
 
+    if (debt_id && !debtResult.data) {
+      res.status(400).json({ success: false, error: 'Debt not found or does not belong to user' });
+      return;
+    }
+
     if (flow_expense_category_id && !expenseCategoryResult.data) {
       res.status(400).json({ success: false, error: 'Expense category not found or does not belong to user' });
       return;
     }
 
+    // Create recurring schedule FIRST if recurring_frequency is set (for consistency)
+    let scheduleId: string | null = null;
+    if (recurring_frequency && recurring_frequency !== 'none') {
+      const flowDate = date || new Date().toISOString().split('T')[0];
+      const nextRunDate = calculateNextRunDate(flowDate, recurring_frequency as ScheduleFrequency);
+
+      const flowTemplate: FlowTemplate = {
+        type,
+        amount: parseFloat(amount),
+        currency: currency || 'USD',
+        from_asset_id: from_asset_id || null,
+        to_asset_id: to_asset_id || null,
+        debt_id: debt_id || null,
+        category: category?.trim() || null,
+        description: description?.trim() || null,
+        flow_expense_category_id: flow_expense_category_id || null,
+        metadata: metadata || null,
+      };
+
+      const { data: schedule, error: scheduleError } = await supabaseAdmin
+        .from('recurring_schedules')
+        .insert({
+          user_id: userId,
+          source_flow_id: null, // Will update after flow is created
+          frequency: recurring_frequency,
+          next_run_date: nextRunDate,
+          is_active: true,
+          flow_template: flowTemplate,
+        })
+        .select()
+        .single();
+
+      if (scheduleError || !schedule) {
+        console.error('Schedule create error:', scheduleError);
+        throw new AppError('Failed to create recurring schedule', 500);
+      }
+
+      scheduleId = schedule.id;
+    }
+
+    // Now create the flow with schedule_id included
     const { data: flow, error } = await supabaseAdmin
       .from('flows')
       .insert({
@@ -266,23 +329,134 @@ export const createFlow = async (
         currency: currency || 'USD',
         from_asset_id: from_asset_id || null,
         to_asset_id: to_asset_id || null,
+        debt_id: debt_id || null,
         category: category?.trim() || null,
         date: date || new Date().toISOString().split('T')[0],
         description: description?.trim() || null,
-        tax_withheld: tax_withheld ? parseFloat(tax_withheld) : null,
-        recurring_frequency: recurring_frequency || null,
         flow_expense_category_id: flow_expense_category_id || null,
         metadata: metadata || null,
+        needs_review: needs_review || false,
+        schedule_id: scheduleId,
       })
       .select()
       .single();
 
     if (error) {
       console.error('Flow create error:', error);
+      // If flow creation fails and we created a schedule, clean it up
+      if (scheduleId) {
+        await supabaseAdmin.from('recurring_schedules').delete().eq('id', scheduleId);
+      }
       throw new AppError('Failed to create flow', 500);
     }
 
-    // Asset balances are automatically updated by database trigger
+    // Update schedule with source_flow_id now that we have the flow id
+    if (scheduleId) {
+      await supabaseAdmin
+        .from('recurring_schedules')
+        .update({ source_flow_id: flow.id })
+        .eq('id', scheduleId);
+    }
+
+    // Adjust asset balances if requested
+    if (adjust_balances) {
+      const flowAmount = parseFloat(amount);
+      const flowCurrency = currency || 'USD';
+      const flowShares = metadata?.shares ? parseFloat(metadata.shares as string) : null;
+
+      // Share-based asset types use shares for balance, not currency amount
+      const SHARE_BASED_TYPES = ['stock', 'etf', 'crypto'];
+
+      // Collect all asset IDs that need to be updated
+      const assetIds: string[] = [];
+      if (from_asset_id) assetIds.push(from_asset_id);
+      if (to_asset_id) assetIds.push(to_asset_id);
+
+      if (assetIds.length > 0) {
+        // Fetch all assets with their currencies and types
+        const { data: assets } = await supabaseAdmin
+          .from('assets')
+          .select('id, balance, currency, type')
+          .in('id', assetIds);
+
+        const assetMap = new Map(assets?.map(a => [a.id, a]) || []);
+
+        // Collect all currencies for exchange rates
+        const currencies = new Set<string>([flowCurrency.toLowerCase()]);
+        assets?.forEach(a => currencies.add((a.currency || 'USD').toLowerCase()));
+
+        // Get exchange rates
+        const rateMap = await getExchangeRates(Array.from(currencies));
+
+        // Helper to update asset balance
+        // For share-based assets (stock, etf, crypto): uses shares count
+        // For currency-based assets: uses amount with currency conversion
+        const updateAssetBalance = async (assetId: string, delta: number, isShareBased: boolean, sharesDelta: number | null) => {
+          const asset = assetMap.get(assetId);
+          if (!asset) return;
+
+          // For share-based assets, use shares directly (no currency conversion)
+          if (isShareBased && sharesDelta !== null) {
+            const newBalance = Number(asset.balance) + sharesDelta;
+            await supabaseAdmin
+              .from('assets')
+              .update({ balance: newBalance, updated_at: new Date().toISOString() })
+              .eq('id', assetId);
+            return;
+          }
+
+          // For currency-based assets, convert if needed
+          const assetCurrency = asset.currency || 'USD';
+          let convertedDelta = delta;
+
+          // Convert delta from flow currency to asset currency if different
+          if (flowCurrency.toLowerCase() !== assetCurrency.toLowerCase()) {
+            const conversion = convertAmount(Math.abs(delta), flowCurrency, assetCurrency, rateMap);
+            if (conversion) {
+              convertedDelta = delta >= 0 ? conversion.converted : -conversion.converted;
+            }
+          }
+
+          const newBalance = Number(asset.balance) + convertedDelta;
+          await supabaseAdmin
+            .from('assets')
+            .update({ balance: newBalance, updated_at: new Date().toISOString() })
+            .eq('id', assetId);
+        };
+
+        // Handle balance adjustments based on flow type
+        if (type === 'income') {
+          // Income increases to_asset balance
+          if (to_asset_id) {
+            const toAsset = assetMap.get(to_asset_id);
+            const isShareBased = toAsset && SHARE_BASED_TYPES.includes(toAsset.type);
+            await updateAssetBalance(to_asset_id, flowAmount, isShareBased || false, flowShares);
+          }
+        } else if (type === 'expense') {
+          // Expense decreases from_asset balance
+          if (from_asset_id) {
+            const fromAsset = assetMap.get(from_asset_id);
+            const isShareBased = fromAsset && SHARE_BASED_TYPES.includes(fromAsset.type);
+            await updateAssetBalance(from_asset_id, -flowAmount, isShareBased || false, flowShares ? -flowShares : null);
+          }
+        } else if (type === 'transfer') {
+          // Transfer: from_asset decreases, to_asset increases
+          const updates: Promise<void>[] = [];
+          if (from_asset_id) {
+            const fromAsset = assetMap.get(from_asset_id);
+            const isShareBased = fromAsset && SHARE_BASED_TYPES.includes(fromAsset.type);
+            updates.push(updateAssetBalance(from_asset_id, -flowAmount, isShareBased || false, flowShares ? -flowShares : null));
+          }
+          if (to_asset_id) {
+            const toAsset = assetMap.get(to_asset_id);
+            const isShareBased = toAsset && SHARE_BASED_TYPES.includes(toAsset.type);
+            updates.push(updateAssetBalance(to_asset_id, flowAmount, isShareBased || false, flowShares));
+          }
+          await Promise.all(updates);
+        }
+      }
+    }
+
     res.status(201).json({ success: true, data: flow });
   } catch (err) {
     console.error('Flow create unexpected error:', err);
@@ -293,6 +467,7 @@ export const createFlow = async (
 
 /**
  * Update an existing flow
+ * Optionally adjusts related asset balances when amount changes
  */
 export const updateFlow = async (
   req: AuthenticatedRequest,
@@ -307,13 +482,15 @@ export const updateFlow = async (
       currency,
       from_asset_id,
       to_asset_id,
+      debt_id,
       category,
       date,
       description,
-      tax_withheld,
       recurring_frequency,
       flow_expense_category_id,
       metadata,
+      needs_review,
+      adjust_balances, // New flag to adjust related asset balances
     } = req.body;
 
     // Check if flow exists and belongs to user
@@ -337,12 +514,9 @@ export const updateFlow = async (
     const newToAssetId = to_asset_id !== undefined ? to_asset_id : existingFlow.to_asset_id;
 
     // Validate flow type constraints if type or asset references are being updated
+    // Income: to_asset_id required, from_asset_id optional (e.g., dividends can link to stock)
     if (type !== undefined || from_asset_id !== undefined || to_asset_id !== undefined) {
       if (newType === 'income') {
-        if (newFromAssetId) {
-          res.status(400).json({ success: false, error: 'Income flows cannot have a from_asset_id' });
-          return;
-        }
         if (!newToAssetId) {
           res.status(400).json({ success: false, error: 'Income flows must have a to_asset_id' });
           return;
@@ -368,17 +542,21 @@ export const updateFlow = async (
       }
     }
 
-    // Verify new assets and expense category belong to user (parallel checks)
+    // Verify new assets, debt, and expense category belong to user (parallel checks)
     const checkFromAsset = from_asset_id !== undefined && from_asset_id !== null;
     const checkToAsset = to_asset_id !== undefined && to_asset_id !== null;
+    const checkDebt = debt_id !== undefined && debt_id !== null;
     const checkExpenseCategory = flow_expense_category_id !== undefined && flow_expense_category_id !== null;
 
-    const [fromAssetResult, toAssetResult, expenseCategoryResult] = await Promise.all([
+    const [fromAssetResult, toAssetResult, debtResult, expenseCategoryResult] = await Promise.all([
       checkFromAsset
         ? supabaseAdmin.from('assets').select('id').eq('id', from_asset_id).eq('user_id', userId).single()
         : Promise.resolve({ data: { id: null } }),
       checkToAsset
         ? supabaseAdmin.from('assets').select('id').eq('id', to_asset_id).eq('user_id', userId).single()
+        : Promise.resolve({ data: { id: null } }),
+      checkDebt
+        ? supabaseAdmin.from('debts').select('id').eq('id', debt_id).eq('user_id', userId).single()
         : Promise.resolve({ data: { id: null } }),
       checkExpenseCategory
         ? supabaseAdmin.from('flow_expense_categories').select('id').eq('id', flow_expense_category_id).eq('user_id', userId).single()
@@ -395,6 +573,11 @@ export const updateFlow = async (
       return;
     }
 
+    if (checkDebt && !debtResult.data) {
+      res.status(400).json({ success: false, error: 'Debt not found or does not belong to user' });
+      return;
+    }
+
     if (checkExpenseCategory && !expenseCategoryResult.data) {
       res.status(400).json({ success: false, error: 'Expense category not found or does not belong to user' });
       return;
@@ -405,14 +588,75 @@ export const updateFlow = async (
     if (currency !== undefined) updates.currency = currency;
     if (from_asset_id !== undefined) updates.from_asset_id = from_asset_id || null;
     if (to_asset_id !== undefined) updates.to_asset_id = to_asset_id || null;
+    if (debt_id !== undefined) updates.debt_id = debt_id || null;
     if (category !== undefined) updates.category = category?.trim() || null;
     if (date !== undefined) updates.date = date;
     if (description !== undefined) updates.description = description?.trim() || null;
-    if (tax_withheld !== undefined) updates.tax_withheld = tax_withheld ? parseFloat(tax_withheld) : null;
-    if (recurring_frequency !== undefined) updates.recurring_frequency = recurring_frequency || null;
     if (flow_expense_category_id !== undefined) updates.flow_expense_category_id = flow_expense_category_id || null;
     if (metadata !== undefined) updates.metadata = metadata;
+    if (needs_review !== undefined) updates.needs_review = needs_review;
 
+    // Handle recurring schedule BEFORE updating flow (for consistency)
+    if (recurring_frequency && recurring_frequency !== 'none') {
+      const flowDate = date || existingFlow.date;
+      const nextRunDate = calculateNextRunDate(flowDate, recurring_frequency as ScheduleFrequency);
+
+      const flowTemplate: FlowTemplate = {
+        type: type || existingFlow.type,
+        amount: amount !== undefined ? parseFloat(amount) : existingFlow.amount,
+        currency: currency || existingFlow.currency || 'USD',
+        from_asset_id: from_asset_id !== undefined ? from_asset_id : existingFlow.from_asset_id,
+        to_asset_id: to_asset_id !== undefined ? to_asset_id : existingFlow.to_asset_id,
+        debt_id: debt_id !== undefined ? debt_id : existingFlow.debt_id,
+        category: category !== undefined ? category?.trim() || null : existingFlow.category,
+        description: description !== undefined ? description?.trim() || null : existingFlow.description,
+        flow_expense_category_id: flow_expense_category_id !== undefined ? flow_expense_category_id : existingFlow.flow_expense_category_id,
+        metadata: metadata !== undefined ? metadata : existingFlow.metadata,
+      };
+
+      if (existingFlow.schedule_id) {
+        // Update existing schedule
+        const { error: scheduleError } = await supabaseAdmin
+          .from('recurring_schedules')
+          .update({
+            frequency: recurring_frequency,
+            next_run_date: nextRunDate,
+            flow_template: flowTemplate,
+            is_active: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', existingFlow.schedule_id);
+
+        if (scheduleError) {
+          console.error('Schedule update error:', scheduleError);
+          throw new AppError('Failed to update recurring schedule', 500);
+        }
+      } else {
+        // Create new schedule first
+        const { data: schedule, error: scheduleError } = await supabaseAdmin
+          .from('recurring_schedules')
+          .insert({
+            user_id: userId,
+            source_flow_id: id,
+            frequency: recurring_frequency,
+            next_run_date: nextRunDate,
+            is_active: true,
+            flow_template: flowTemplate,
+          })
+          .select()
+          .single();
+
+        if (scheduleError || !schedule) {
+          console.error('Schedule create error:', scheduleError);
+          throw new AppError('Failed to create recurring schedule', 500);
+        }
+
+        // Include schedule_id in the flow update
+        updates.schedule_id = schedule.id;
+      }
+    }
+
+    // Now update the flow (including schedule_id if new schedule was created)
     const { data: flow, error } = await supabaseAdmin
       .from('flows')
       .update(updates)
@@ -425,7 +669,91 @@ export const updateFlow = async (
       throw new AppError('Failed to update flow', 500);
     }
 
-    // Asset balances are automatically updated by database trigger
+    // Adjust asset balances if requested and amount changed
+    if (adjust_balances && amount !== undefined) {
+      const oldAmount = Number(existingFlow.amount);
+      const newAmount = parseFloat(amount);
+      const difference = newAmount - oldAmount;
+      const flowCurrency = existingFlow.currency || 'USD';
+
+      if (difference !== 0) {
+        // Collect all asset IDs that need to be updated
+        const assetIds: string[] = [];
+        if (existingFlow.from_asset_id) assetIds.push(existingFlow.from_asset_id);
+        if (existingFlow.to_asset_id) assetIds.push(existingFlow.to_asset_id);
+
+        // Fetch all assets with their currencies
+        const { data: assets } = await supabaseAdmin
+          .from('assets')
+          .select('id, balance, currency')
+          .in('id', assetIds);
+
+        const assetMap = new Map(assets?.map(a => [a.id, a]) || []);
+
+        // Collect all currencies for exchange rates
+        const currencies = new Set<string>([flowCurrency.toLowerCase()]);
+        assets?.forEach(a => currencies.add((a.currency || 'USD').toLowerCase()));
+
+        // Get exchange rates
+        const rateMap = await getExchangeRates(Array.from(currencies));
+
+        // Helper to update asset balance with currency conversion
+        const updateAssetBalance = async (assetId: string, delta: number) => {
+          const asset = assetMap.get(assetId);
+          if (!asset) return;
+
+          const assetCurrency = asset.currency || 'USD';
+          let convertedDelta = delta;
+
+          // Convert delta from flow currency to asset currency if different
+          if (flowCurrency.toLowerCase() !== assetCurrency.toLowerCase()) {
+            const conversion = convertAmount(Math.abs(delta), flowCurrency, assetCurrency, rateMap);
+            if (conversion) {
+              convertedDelta = delta >= 0 ? conversion.converted : -conversion.converted;
+            }
+          }
+
+          const newBalance = Number(asset.balance) + convertedDelta;
+          await supabaseAdmin
+            .from('assets')
+            .update({ balance: newBalance, updated_at: new Date().toISOString() })
+            .eq('id', assetId);
+        };
+
+        // Handle balance adjustments based on flow type
+        // Income: money goes TO to_asset (increase balance)
+        // Expense: money goes FROM from_asset (decrease balance)
+        // Transfer: money goes FROM from_asset TO to_asset
+
+        const flowType = existingFlow.type;
+
+        if (flowType === 'income') {
+          // Income increases to_asset balance
+          // If amount increased, add more to to_asset
+          if (existingFlow.to_asset_id) {
+            await updateAssetBalance(existingFlow.to_asset_id, difference);
+          }
+        } else if (flowType === 'expense') {
+          // Expense decreases from_asset balance
+          // If expense amount increased, subtract more from from_asset
+          if (existingFlow.from_asset_id) {
+            await updateAssetBalance(existingFlow.from_asset_id, -difference);
+          }
+        } else if (flowType === 'transfer') {
+          // Transfer: from_asset decreases, to_asset increases
+          // If amount increased, subtract more from from_asset and add more to to_asset
+          const updates: Promise<void>[] = [];
+          if (existingFlow.from_asset_id) {
+            updates.push(updateAssetBalance(existingFlow.from_asset_id, -difference));
+          }
+          if (existingFlow.to_asset_id) {
+            updates.push(updateAssetBalance(existingFlow.to_asset_id, difference));
+          }
+          await Promise.all(updates);
+        }
+      }
+    }
+
     res.json({ success: true, data: flow });
   } catch (err) {
     console.error('Flow update unexpected error:', err);
@@ -464,7 +792,6 @@ export const deleteFlow = async (
       throw new AppError('Failed to delete flow', 500);
     }
 
-    // Asset balances are automatically updated by database trigger
     res.json({ success: true, message: 'Flow deleted successfully' });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -495,13 +822,14 @@ export const getFlowStats = async (
     const startDate = start_date || defaultStartDate;
     const endDate = end_date || defaultEndDate;
 
-    // Get all flows in the date range
+    // Get all flows in the date range (excluding adjustments which are balance corrections)
     const { data: flows, error } = await supabaseAdmin
       .from('flows')
-      .select('type, amount, currency')
+      .select('type, amount, currency, category')
       .eq('user_id', userId)
       .gte('date', startDate)
-      .lte('date', endDate);
+      .lte('date', endDate)
+      .neq('category', 'adjustment');
 
     if (error) {
       throw new AppError('Failed to fetch flow stats', 500);
@@ -536,3 +864,99 @@ export const getFlowStats = async (
     res.status(500).json({ success: false, error: 'Failed to fetch flow stats' });
   }
 };
+
+/**
+ * Mark a flow as reviewed (sets needs_review to false)
+ */
+export const markFlowReviewed = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<Flow>>
+): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    // Check if flow exists and belongs to user
+    const { data: existingFlow, error: fetchError } = await supabaseAdmin
+      .from('flows')
+      .select('id')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+
+    if (fetchError || !existingFlow) {
+      res.status(404).json({ success: false, error: 'Flow not found' });
+      return;
+    }
+
+    const { data: flow, error } = await supabaseAdmin
+      .from('flows')
+      .update({ needs_review: false, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      throw new AppError('Failed to mark flow as reviewed', 500);
+    }
+
+    res.json({ success: true, data: flow });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    res.status(500).json({ success: false, error: 'Failed to mark flow as reviewed' });
+  }
+};
+
+/**
+ * Get count of flows needing review
+ */
+export const getFlowsNeedingReviewCount = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<{ count: number }>>
+): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+
+    const { count, error } = await supabaseAdmin
+      .from('flows')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('needs_review', true);
+
+    if (error) {
+      throw new AppError('Failed to fetch review count', 500);
+    }
+
+    res.json({ success: true, data: { count: count || 0 } });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    res.status(500).json({ success: false, error: 'Failed to fetch review count' });
+  }
+};
+
+/**
+ * Calculate the next run date based on frequency
+ */
+function calculateNextRunDate(currentDate: string, frequency: ScheduleFrequency): string {
+  const date = new Date(currentDate);
+
+  switch (frequency) {
+    case 'weekly':
+      date.setDate(date.getDate() + 7);
+      break;
+    case 'biweekly':
+      date.setDate(date.getDate() + 14);
+      break;
+    case 'monthly':
+      date.setMonth(date.getMonth() + 1);
+      break;
+    case 'quarterly':
+      date.setMonth(date.getMonth() + 3);
+      break;
+    case 'yearly':
+      date.setFullYear(date.getFullYear() + 1);
+      break;
+  }
+
+  return date.toISOString().split('T')[0];
+}

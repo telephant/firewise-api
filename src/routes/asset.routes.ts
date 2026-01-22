@@ -6,6 +6,7 @@ import {
   createAsset,
   updateAsset,
   deleteAsset,
+  getNetWorthStats,
 } from '../controllers/asset.controller';
 
 const router = Router();
@@ -16,6 +17,7 @@ router.use(authMiddleware);
 // Asset routes (user-scoped, not ledger-scoped)
 router.get('/', getAssets);
 router.post('/', createAsset);
+router.get('/stats/net-worth', getNetWorthStats); // Must be before /:id
 router.get('/:id', getAsset);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);

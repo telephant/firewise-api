@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getExpenseStats = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
+const currency_conversion_1 = require("../utils/currency-conversion");
 /**
  * Get expense statistics for the FIRE dashboard
  * Optimized: Uses 2-3 parallel queries instead of many sequential ones
@@ -14,16 +15,24 @@ const getExpenseStats = async (req, res) => {
             res.status(401).json({ success: false, error: 'Unauthorized' });
             return;
         }
-        // Calculate date ranges
-        // - Current month: for this month's expenses
-        // - Previous 6 months (excluding current): for monthly average calculation
+        // Parse optional year/month query parameters
+        // month is 1-12 (January = 1), defaults to current month
         const now = new Date();
-        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        // Go back 6 months for average calculation (excluding current month)
-        const sixMonthsAgoStart = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+        const queryYear = req.query.year ? parseInt(req.query.year, 10) : now.getFullYear();
+        const queryMonth = req.query.month ? parseInt(req.query.month, 10) - 1 : now.getMonth(); // Convert 1-12 to 0-11
+        // Calculate date ranges based on query parameters or current date
+        // - Target month: for this month's expenses
+        // - Previous 6 months (excluding target): for monthly average calculation
+        const currentMonthStart = new Date(queryYear, queryMonth, 1);
+        const previousMonthStart = new Date(queryYear, queryMonth - 1, 1);
+        const currentMonthEnd = new Date(queryYear, queryMonth + 1, 0);
+        // Go back 6 months for average calculation (excluding target month)
+        const sixMonthsAgoStart = new Date(queryYear, queryMonth - 6, 1);
         const formatDate = (d) => d.toISOString().split('T')[0];
+        // Get user preferences for currency conversion
+        const userPrefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = userPrefs?.preferred_currency || 'USD';
+        const shouldConvert = userPrefs?.convert_all_to_preferred || false;
         // Single query to get all flows for 6+ months (income + expense)
         // This is more efficient than multiple queries
         const [flowsResult, linkedLedgersResult] = await Promise.all([
@@ -32,6 +41,7 @@ const getExpenseStats = async (req, res) => {
                 .select(`
           type,
           amount,
+          currency,
           date,
           flow_expense_category_id,
           flow_expense_category:flow_expense_categories(id, name, icon)
@@ -54,6 +64,23 @@ const getExpenseStats = async (req, res) => {
         const previousMonthStartStr = formatDate(previousMonthStart);
         // Helper to get month key (YYYY-MM) from date string
         const getMonthKey = (dateStr) => dateStr.substring(0, 7);
+        // Collect all unique currencies from flows for exchange rate lookup
+        const flowCurrencies = new Set();
+        flowCurrencies.add(preferredCurrency.toLowerCase());
+        flows.forEach((flow) => {
+            if (flow.currency) {
+                flowCurrencies.add(flow.currency.toLowerCase());
+            }
+        });
+        // Fetch exchange rates for all currencies used
+        const rateMap = shouldConvert ? await (0, currency_conversion_1.getExchangeRates)(Array.from(flowCurrencies)) : new Map();
+        // Helper to convert amount to preferred currency
+        const toPreferred = (amount, fromCurrency) => {
+            if (!shouldConvert)
+                return amount;
+            const result = (0, currency_conversion_1.convertAmount)(amount, fromCurrency, preferredCurrency, rateMap);
+            return result ? result.converted : amount;
+        };
         // Process flows in a single pass
         let manualTotalCurrent = 0;
         let manualTotalPrevious = 0;
@@ -63,7 +90,9 @@ const getExpenseStats = async (req, res) => {
         // Track expenses by month for average calculation (excluding current month)
         const expensesByMonth = new Map();
         flows.forEach((flow) => {
-            const amount = Number(flow.amount);
+            const rawAmount = Number(flow.amount);
+            const flowCurrency = flow.currency || 'USD';
+            const amount = toPreferred(rawAmount, flowCurrency);
             const isCurrentMonth = flow.date >= currentMonthStartStr;
             const isPreviousMonth = flow.date >= previousMonthStartStr && flow.date < currentMonthStartStr;
             if (flow.type === 'income') {
@@ -121,45 +150,45 @@ const getExpenseStats = async (req, res) => {
             if (linkedError) {
                 console.error('Error fetching linked ledger expenses:', linkedError);
             }
-            // Get unique currency codes and fetch rates from currency_exchange
-            const currencyCodes = new Set();
+            // Collect unique currency codes from linked expenses
+            const ledgerCurrencies = new Set();
+            ledgerCurrencies.add(preferredCurrency.toLowerCase());
             (linkedExpenses || []).forEach((exp) => {
                 const currency = exp.ledger_currencies;
                 if (currency?.code) {
-                    currencyCodes.add(currency.code.toLowerCase());
+                    ledgerCurrencies.add(currency.code.toLowerCase());
                 }
             });
-            // Fetch exchange rates for all currencies used
-            const { data: exchangeRates } = await supabase_1.supabaseAdmin
-                .from('currency_exchange')
-                .select('code, rate')
-                .in('code', Array.from(currencyCodes));
-            // Build code -> rate map
-            const rateMap = {};
-            (exchangeRates || []).forEach((er) => {
-                rateMap[er.code] = er.rate;
+            // Fetch exchange rates for ledger currencies (merge with existing rateMap)
+            const ledgerRateMap = shouldConvert
+                ? await (0, currency_conversion_1.getExchangeRates)(Array.from(ledgerCurrencies))
+                : new Map();
+            // Merge ledger rates into main rateMap
+            ledgerRateMap.forEach((rate, code) => {
+                if (!rateMap.has(code)) {
+                    rateMap.set(code, rate);
+                }
             });
             (linkedExpenses || []).forEach((exp) => {
-                const amount = Number(exp.amount);
+                const rawAmount = Number(exp.amount);
                 const currency = exp.ledger_currencies;
-                // Convert to USD: amount in foreign currency / rate = amount in USD
-                // e.g., 720 CNY / 7.2 = 100 USD
-                const rate = currency?.code ? (rateMap[currency.code.toLowerCase()] || 1) : 1;
-                const amountInUsd = rate > 0 ? amount / rate : amount;
+                const expCurrency = currency?.code || 'USD';
+                // Convert to preferred currency using the same helper
+                const amount = toPreferred(rawAmount, expCurrency);
                 const isCurrentMonth = exp.date >= currentMonthStartStr;
                 const isPreviousMonth = exp.date >= previousMonthStartStr && exp.date < currentMonthStartStr;
                 if (isCurrentMonth) {
-                    linkedLedgerTotalCurrent += amountInUsd;
+                    linkedLedgerTotalCurrent += amount;
                     linkedLedgerExpenseCount++;
                 }
                 else {
                     // Track previous month separately for trend
                     if (isPreviousMonth) {
-                        linkedLedgerTotalPrevious += amountInUsd;
+                        linkedLedgerTotalPrevious += amount;
                     }
                     // Track all historical months for average (excluding current)
                     const monthKey = getMonthKey(exp.date);
-                    expensesByMonth.set(monthKey, (expensesByMonth.get(monthKey) || 0) + amountInUsd);
+                    expensesByMonth.set(monthKey, (expensesByMonth.get(monthKey) || 0) + amount);
                 }
             });
         }

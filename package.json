@@ -11,7 +11,8 @@
     "test:watch": "jest --watch ",
     "test:connection": "jest --testMatch='**/supabase.connection.test.ts' --setupFiles='' --verbose",
     "task": "ts-node tasks/index.ts",
-    "task:update-currency": "ts-node tasks/index.ts update-currency"
+    "task:update-currency": "ts-node tasks/index.ts update-currency",
+    "task:check-dividends": "ts-node tasks/index.ts check-dividends"
   },
   "keywords": [],
   "author": "",

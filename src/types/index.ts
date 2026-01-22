@@ -115,9 +115,16 @@ export interface StatsFilters {
 }
 
 // Monthly stats types
+export interface MonthCategoryStats {
+  category_id: string | null;
+  category_name: string;
+  amount: number;
+}
+
 export interface MonthTotal {
   month: string; // 'YYYY-MM' format
   total: number;
+  by_category: MonthCategoryStats[];
 }
 
 export interface MonthlyStatsResponse {
@@ -126,8 +133,8 @@ export interface MonthlyStatsResponse {
   currency_id: string;
 }
 
-// Asset types
-export type AssetType = 'cash' | 'stock' | 'etf' | 'bond' | 'real_estate' | 'crypto' | 'debt' | 'other';
+// Asset types (debt is now in separate debts table)
+export type AssetType = 'cash' | 'deposit' | 'stock' | 'etf' | 'bond' | 'real_estate' | 'crypto' | 'other';
 
 export interface Asset {
   id: string;
@@ -140,6 +147,7 @@ export interface Asset {
   balance: number;
   balance_updated_at: string | null;
   metadata: Record<string, unknown> | null;
+  growth_rates: { '5y': number | null; '10y': number | null; updated_at?: string } | null;
   created_at: string;
   updated_at: string;
 }
@@ -151,24 +159,25 @@ export type AssetWithBalance = Asset;
 // Income:   [External] → [Your Asset]
 // Expense:  [Your Asset] → [External]
 // Transfer: [Your Asset] → [Your Asset]
-export type FlowType = 'income' | 'expense' | 'transfer';
-export type RecurringFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
+// Other:    Balance corrections, misc adjustments
+export type FlowType = 'income' | 'expense' | 'transfer' | 'other';
 
 export interface Flow {
   id: string;
   user_id: string;
   type: FlowType;
-  amount: number;
+  amount: number; // For dividends, this is NET amount (after tax). Tax info in metadata.
   currency: string;
   from_asset_id: string | null;
   to_asset_id: string | null;
+  debt_id: string | null; // Reference to debt for debt payments
   category: string | null;
   date: string;
   description: string | null;
-  tax_withheld: number | null;
-  recurring_frequency: RecurringFrequency | null;
   flow_expense_category_id: string | null;
+  schedule_id: string | null; // Reference to recurring schedule that generated this flow
   metadata: Record<string, unknown> | null;
+  needs_review: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -184,6 +193,7 @@ export interface FlowFilters extends PaginationParams {
   start_date?: string;
   end_date?: string;
   asset_id?: string;
+  needs_review?: boolean;
 }
 
 export interface FlowStatsResponse {
@@ -210,4 +220,84 @@ export interface FlowExpenseCategory {
   sort_order: number;
   created_at: string;
   updated_at: string;
+}
+
+// Debt types
+export type DebtType = 'mortgage' | 'personal_loan' | 'credit_card' | 'student_loan' | 'auto_loan' | 'other';
+export type DebtStatus = 'active' | 'paid_off';
+
+export interface Debt {
+  id: string;
+  user_id: string;
+  name: string;
+  debt_type: DebtType;
+  currency: string;
+  principal: number;
+  interest_rate: number | null;
+  term_months: number | null;
+  start_date: string | null;
+  current_balance: number;
+  monthly_payment: number | null;
+  balance_updated_at: string | null;
+  status: DebtStatus;
+  paid_off_date: string | null;
+  property_asset_id: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DebtFilters extends PaginationParams {
+  status?: DebtStatus;
+  debt_type?: DebtType;
+}
+
+// User Preferences (currency settings, expandable for future preferences)
+export interface UserPreferences {
+  id: string;
+  user_id: string;
+  preferred_currency: string;
+  convert_all_to_preferred: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// Recurring Schedule types
+export type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
+
+export interface FlowTemplate {
+  type: FlowType;
+  amount: number;
+  currency: string;
+  from_asset_id: string | null;
+  to_asset_id: string | null;
+  debt_id: string | null;
+  category: string | null;
+  description: string | null;
+  flow_expense_category_id: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface RecurringSchedule {
+  id: string;
+  user_id: string;
+  source_flow_id: string | null;
+  frequency: ScheduleFrequency;
+  next_run_date: string;
+  last_run_date: string | null;
+  is_active: boolean;
+  flow_template: FlowTemplate;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecurringScheduleFilters extends PaginationParams {
+  is_active?: boolean;
+  frequency?: ScheduleFrequency;
+}
+
+export interface ProcessRecurringResult {
+  processed: number;
+  created_flows: string[];
+  errors: { schedule_id: string; error: string }[];
 }
