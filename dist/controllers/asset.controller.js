@@ -4,43 +4,7 @@ exports.getNetWorthStats = exports.deleteAsset = exports.updateAsset = exports.c
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
 const currency_conversion_1 = require("../utils/currency-conversion");
-// Cache for stock prices (5 minute TTL)
-const stockPriceCache = new Map();
-const STOCK_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-/**
- * Fetch stock price from Yahoo Finance
- */
-async function fetchStockPrice(symbol) {
-    try {
-        // Check cache first
-        const cached = stockPriceCache.get(symbol);
-        if (cached && Date.now() - cached.timestamp < STOCK_CACHE_TTL) {
-            return { price: cached.price, currency: cached.currency };
-        }
-        const now = Math.floor(Date.now() / 1000);
-        const oneDayAgo = now - 86400;
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${oneDayAgo}&period2=${now}&interval=1d`;
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            },
-        });
-        if (!response.ok)
-            return null;
-        const data = await response.json();
-        if (data.chart?.error || !data.chart?.result?.[0])
-            return null;
-        const meta = data.chart.result[0].meta;
-        const price = meta.regularMarketPrice;
-        const currency = meta.currency || 'USD';
-        // Cache the result
-        stockPriceCache.set(symbol, { price, currency, timestamp: Date.now() });
-        return { price, currency };
-    }
-    catch {
-        return null;
-    }
-}
+const stock_price_1 = require("../utils/stock-price");
 /**
  * Add stock prices and converted values to stock/ETF assets
  * Balance remains as shares, but we calculate and convert market_value
@@ -50,7 +14,7 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
     const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
     const tickers = [...new Set(stockAssets.map(a => a.ticker))];
     // Fetch all stock prices in parallel
-    const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+    const pricePromises = tickers.map(ticker => (0, stock_price_1.fetchStockPrice)(ticker));
     const priceResults = await Promise.all(pricePromises);
     // Create price map
     const priceMap = new Map();
@@ -374,7 +338,7 @@ const getNetWorthStats = async (req, res) => {
         // Find stock/ETF assets and fetch prices
         const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
         const tickers = [...new Set(stockAssets.map(a => a.ticker))];
-        const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+        const pricePromises = tickers.map(ticker => (0, stock_price_1.fetchStockPrice)(ticker));
         const priceResults = await Promise.all(pricePromises);
         const priceMap = new Map();
         tickers.forEach((ticker, index) => {

@@ -3,54 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, AssetFilters } from '../types';
 import { AppError } from '../middleware/error';
 import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
-
-// Cache for stock prices (5 minute TTL)
-const stockPriceCache = new Map<string, { price: number; currency: string; timestamp: number }>();
-const STOCK_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Fetch stock price from Yahoo Finance
- */
-async function fetchStockPrice(symbol: string): Promise<{ price: number; currency: string } | null> {
-  try {
-    // Check cache first
-    const cached = stockPriceCache.get(symbol);
-    if (cached && Date.now() - cached.timestamp < STOCK_CACHE_TTL) {
-      return { price: cached.price, currency: cached.currency };
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-    const oneDayAgo = now - 86400;
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${oneDayAgo}&period2=${now}&interval=1d`;
-
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      },
-    });
-
-    if (!response.ok) return null;
-
-    const data = await response.json() as {
-      chart?: {
-        error?: unknown;
-        result?: Array<{ meta: { regularMarketPrice: number; currency?: string } }>;
-      };
-    };
-    if (data.chart?.error || !data.chart?.result?.[0]) return null;
-
-    const meta = data.chart.result[0].meta;
-    const price = meta.regularMarketPrice;
-    const currency = meta.currency || 'USD';
-
-    // Cache the result
-    stockPriceCache.set(symbol, { price, currency, timestamp: Date.now() });
-
-    return { price, currency };
-  } catch {
-    return null;
-  }
-}
+import { fetchStockPrice, fetchStockPrices } from '../utils/stock-price';
 
 interface StockAssetResult extends Asset {
   stock_price?: number;
@@ -131,18 +84,23 @@ export const getAssets = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
-    const { page = '1', limit = '50', type } = req.query as unknown as AssetFilters & { page: string; limit: string };
+    const { page = '1', limit = '50', type, sortBy = 'created_at', sortOrder = 'desc' } = req.query as unknown as AssetFilters & { page: string; limit: string; sortBy?: string; sortOrder?: string };
 
     const pageNum = parseInt(page as string, 10) || 1;
     const limitNum = Math.min(parseInt(limit as string, 10) || 50, 100);
     const offset = (pageNum - 1) * limitNum;
+
+    // Validate sort field
+    const validSortFields = ['name', 'type', 'balance', 'created_at', 'updated_at'];
+    const sortField = validSortFields.includes(sortBy as string) ? sortBy : 'created_at';
+    const ascending = sortOrder === 'asc';
 
     // Build query
     let query = supabaseAdmin
       .from('assets')
       .select('*', { count: 'exact' })
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .order(sortField as string, { ascending });
 
     if (type) {
       query = query.eq('type', type);

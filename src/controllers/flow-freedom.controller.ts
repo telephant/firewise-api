@@ -2,11 +2,8 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Debt } from '../types';
 import { AppError } from '../middleware/error';
-import { getUserPreferences, sumWithConversion, MoneyEntry } from '../utils/currency-conversion';
-import { calculateDataWindow, mapToMonthlyData, DataQuality, ConfidenceLevel } from '../utils/data-window';
-
-// Passive income categories
-const PASSIVE_INCOME_CATEGORIES = ['dividend', 'rental', 'interest'];
+import { DataQuality, ConfidenceLevel } from '../utils/data-window';
+import { getFinancialStats } from '../utils/financial-stats';
 
 // Debt item for breakdown
 interface DebtBreakdownItem {
@@ -63,6 +60,7 @@ interface FlowFreedomResponse {
 /**
  * Get Flow Freedom statistics
  * Calculates passive income vs expenses to determine financial independence progress
+ * Uses shared financial stats for income/expense calculations
  */
 export const getFlowFreedom = async (
   req: AuthenticatedRequest,
@@ -75,250 +73,83 @@ export const getFlowFreedom = async (
       return;
     }
 
-    // Get user preferences for currency conversion
-    // For Flow Freedom, we ALWAYS convert to preferred currency since we're summing amounts
-    const userPrefs = await getUserPreferences(userId);
-    const preferredCurrency = userPrefs?.preferred_currency || 'USD';
+    // Get shared financial stats (cached)
+    const financialStats = await getFinancialStats(userId);
 
-    // Calculate date ranges
+    // Calculate date range for pending review check
     const now = new Date();
     const twelveMonthsAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1);
     const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
-    // Fetch all data in parallel
-    const [flowsResult, linkedLedgersResult, debtsResult] = await Promise.all([
-      // Get flows for the last 12 months
-      supabaseAdmin
-        .from('flows')
-        .select('type, amount, currency, date, category, from_asset_id, needs_review')
-        .eq('user_id', userId)
-        .in('type', ['income', 'expense'])
-        .gte('date', formatDate(twelveMonthsAgo))
-        .neq('category', 'adjustment'),
-      // Get linked ledgers
-      supabaseAdmin
-        .from('fire_linked_ledgers')
-        .select('ledger_id')
-        .eq('user_id', userId),
-      // Get active debts with monthly payments
+    // Fetch debts for payoff calculation and pending review flows
+    const [debtsResult, pendingReviewResult] = await Promise.all([
       supabaseAdmin
         .from('debts')
         .select('*')
         .eq('user_id', userId)
         .gt('current_balance', 0),
+      // Get flows needing review (for pendingReview stats)
+      supabaseAdmin
+        .from('flows')
+        .select('type, category, from_asset_id, needs_review')
+        .eq('user_id', userId)
+        .eq('needs_review', true)
+        .in('type', ['income', 'expense'])
+        .gte('date', formatDate(twelveMonthsAgo)),
     ]);
 
-    if (flowsResult.error) {
-      throw new AppError('Failed to fetch flows', 500);
-    }
-
-    const flows = flowsResult.data || [];
     const debts = (debtsResult.data || []) as Debt[];
+    const pendingFlows = pendingReviewResult.data || [];
 
-    // Collect money entries for batch conversion
-    const passiveIncomeEntries: MoneyEntry[] = [];
-    const dividendEntries: MoneyEntry[] = [];
-    const rentalEntries: MoneyEntry[] = [];
-    const interestEntries: MoneyEntry[] = [];
-    const otherPassiveEntries: MoneyEntry[] = [];
-    const expenseEntries: MoneyEntry[] = [];
-
-    // Track by month (using raw amounts, will be converted later)
-    const passiveIncomeByMonth = new Map<string, MoneyEntry[]>();
-    const expensesByMonth = new Map<string, MoneyEntry[]>();
-
-    // Track excluded flows (under review)
+    // Calculate pending review stats
     let excludedCount = 0;
     let hasExcludedPassiveIncome = false;
     let hasExcludedExpenses = false;
 
-    // Process flows - collect entries (EXCLUDE flows under review)
-    flows.forEach((flow) => {
-      const monthKey = flow.date.substring(0, 7); // YYYY-MM
-
+    pendingFlows.forEach((flow) => {
+      excludedCount++;
       if (flow.type === 'income') {
-        // Check if it's passive income
         const isPassive = flow.from_asset_id !== null ||
-          PASSIVE_INCOME_CATEGORIES.includes(flow.category || '');
-
+          ['dividend', 'rental', 'interest'].includes(flow.category || '');
         if (isPassive) {
-          // Skip flows under review
-          if (flow.needs_review) {
-            excludedCount++;
-            hasExcludedPassiveIncome = true;
-            return; // Skip this flow
-          }
-
-          const entry: MoneyEntry = {
-            amount: Number(flow.amount),
-            currency: flow.currency || 'USD',
-          };
-
-          passiveIncomeEntries.push(entry);
-
-          // Track by month
-          const monthEntries = passiveIncomeByMonth.get(monthKey) || [];
-          monthEntries.push(entry);
-          passiveIncomeByMonth.set(monthKey, monthEntries);
-
-          // Categorize
-          if (flow.category === 'dividend') {
-            dividendEntries.push(entry);
-          } else if (flow.category === 'rental') {
-            rentalEntries.push(entry);
-          } else if (flow.category === 'interest') {
-            interestEntries.push(entry);
-          } else {
-            otherPassiveEntries.push(entry);
-          }
+          hasExcludedPassiveIncome = true;
         }
       } else if (flow.type === 'expense') {
-        // Skip flows under review
-        if (flow.needs_review) {
-          excludedCount++;
-          hasExcludedExpenses = true;
-          return; // Skip this flow
-        }
-
-        const entry: MoneyEntry = {
-          amount: Number(flow.amount),
-          currency: flow.currency || 'USD',
-        };
-
-        expenseEntries.push(entry);
-
-        // Track by month
-        const monthEntries = expensesByMonth.get(monthKey) || [];
-        monthEntries.push(entry);
-        expensesByMonth.set(monthKey, monthEntries);
+        hasExcludedExpenses = true;
       }
     });
 
-    // Fetch linked ledger expenses and add to expense entries
-    const linkedLedgerIds = (linkedLedgersResult.data || []).map((l) => l.ledger_id);
-    if (linkedLedgerIds.length > 0) {
-      const { data: linkedExpenses } = await supabaseAdmin
-        .from('expenses')
-        .select(`
-          amount,
-          date,
-          currency_id,
-          ledger_currencies!currency_id(code)
-        `)
-        .in('ledger_id', linkedLedgerIds)
-        .gte('date', formatDate(twelveMonthsAgo));
-
-      (linkedExpenses || []).forEach((exp) => {
-        const currency = exp.ledger_currencies as unknown as { code: string } | null;
-        const entry: MoneyEntry = {
-          amount: Number(exp.amount),
-          currency: currency?.code || 'USD',
-        };
-
-        expenseEntries.push(entry);
-
-        // Track by month
-        const monthKey = exp.date.substring(0, 7);
-        const monthEntries = expensesByMonth.get(monthKey) || [];
-        monthEntries.push(entry);
-        expensesByMonth.set(monthKey, monthEntries);
-      });
-    }
-
-    // Collect debt payment entries and breakdown info
-    const debtPaymentEntries: MoneyEntry[] = [];
-    const debtBreakdownRaw: { name: string; entry: MoneyEntry; type: string }[] = [];
+    // Calculate debt payoff year
     let latestDebtPayoffYear: number | null = null;
-
     debts.forEach((debt) => {
       const monthlyPayment = Number(debt.monthly_payment) || 0;
-      if (monthlyPayment > 0) {
-        const entry: MoneyEntry = {
-          amount: monthlyPayment,
-          currency: debt.currency || 'USD',
-        };
-
-        // Add annual debt payment as entry
-        debtPaymentEntries.push({
-          amount: monthlyPayment * 12,
-          currency: debt.currency || 'USD',
-        });
-
-        // Collect for breakdown
-        debtBreakdownRaw.push({
-          name: debt.name,
-          entry,
-          type: debt.debt_type,
-        });
-
-        // Calculate payoff date
-        if (debt.current_balance > 0 && debt.interest_rate !== undefined) {
-          const monthsRemaining = calculateMonthsToPayoff(
-            Number(debt.current_balance),
-            Number(debt.interest_rate),
-            monthlyPayment
-          );
-          const payoffYear = now.getFullYear() + Math.ceil(monthsRemaining / 12);
-          if (latestDebtPayoffYear === null || payoffYear > latestDebtPayoffYear) {
-            latestDebtPayoffYear = payoffYear;
-          }
+      if (monthlyPayment > 0 && debt.current_balance > 0 && debt.interest_rate !== undefined) {
+        const monthsRemaining = calculateMonthsToPayoff(
+          Number(debt.current_balance),
+          Number(debt.interest_rate),
+          monthlyPayment
+        );
+        const payoffYear = now.getFullYear() + Math.ceil(monthsRemaining / 12);
+        if (latestDebtPayoffYear === null || payoffYear > latestDebtPayoffYear) {
+          latestDebtPayoffYear = payoffYear;
         }
       }
     });
 
-    // Convert and sum all entries using the utility
-    const [
-      totalPassiveIncome,
-      totalDividends,
-      totalRental,
-      totalInterest,
-      totalOtherPassive,
-      totalExpenses,
-      annualDebtPayments,
-    ] = await Promise.all([
-      sumWithConversion(passiveIncomeEntries, preferredCurrency),
-      sumWithConversion(dividendEntries, preferredCurrency),
-      sumWithConversion(rentalEntries, preferredCurrency),
-      sumWithConversion(interestEntries, preferredCurrency),
-      sumWithConversion(otherPassiveEntries, preferredCurrency),
-      sumWithConversion(expenseEntries, preferredCurrency),
-      sumWithConversion(debtPaymentEntries, preferredCurrency),
-    ]);
+    // Build debt breakdown from shared stats
+    const debtBreakdown: DebtBreakdownItem[] = financialStats.debts.breakdown.map(d => ({
+      name: d.name,
+      monthlyPayment: d.monthlyPayment,
+      type: d.type,
+    }));
 
-    // Convert debt breakdown entries to preferred currency
-    const debtBreakdown: DebtBreakdownItem[] = await Promise.all(
-      debtBreakdownRaw.map(async (item) => {
-        const converted = await sumWithConversion([item.entry], preferredCurrency);
-        return {
-          name: item.name,
-          monthlyPayment: Math.round(converted * 100) / 100,
-          type: item.type,
-        };
-      })
-    );
-
-    // Convert monthly Maps to currency-converted totals for data window calculation
-    const passiveIncomeMonthlyConverted = new Map<string, number>();
-    for (const [month, entries] of passiveIncomeByMonth) {
-      const converted = await sumWithConversion(entries, preferredCurrency);
-      passiveIncomeMonthlyConverted.set(month, converted);
-    }
-
-    const expensesMonthlyConverted = new Map<string, number>();
-    for (const [month, entries] of expensesByMonth) {
-      const converted = await sumWithConversion(entries, preferredCurrency);
-      expensesMonthlyConverted.set(month, converted);
-    }
-
-    // Use data window utility for consistent calculation and confidence
-    const incomeWindow = calculateDataWindow(mapToMonthlyData(passiveIncomeMonthlyConverted));
-    const expenseWindow = calculateDataWindow(mapToMonthlyData(expensesMonthlyConverted));
-
-    const annualPassiveIncome = incomeWindow.annualized;
-    const monthlyPassiveIncome = incomeWindow.monthly_average;
-    const annualLivingExpenses = expenseWindow.annualized;
-    const monthlyLivingExpenses = expenseWindow.monthly_average;
-    const annualTotalExpenses = annualLivingExpenses + annualDebtPayments;
+    // Use values from shared stats
+    const annualPassiveIncome = financialStats.passiveIncome.annual;
+    const monthlyPassiveIncome = financialStats.passiveIncome.monthly;
+    const annualLivingExpenses = financialStats.expenses.living;
+    const annualDebtPayments = financialStats.expenses.debtPayments;
+    const annualTotalExpenses = financialStats.expenses.total;
+    const monthlyTotalExpenses = financialStats.expenses.monthly;
 
     // Calculate Flow Freedom
     const flowFreedomCurrent = annualTotalExpenses > 0
@@ -329,43 +160,35 @@ export const getFlowFreedom = async (
       ? annualPassiveIncome / annualLivingExpenses
       : 0;
 
-    // Calculate time to freedom based on historical trend (reuse converted Map)
+    // Build passiveIncomeByMonth map from monthly history for time-to-freedom calculation
+    const passiveIncomeByMonth = new Map<string, number>();
+    financialStats.monthlyHistory.forEach(({ month, income }) => {
+      passiveIncomeByMonth.set(month, income);
+    });
+
+    // Calculate time to freedom based on historical trend
     const { years, confidence, monthlyGrowthRate, direction } = calculateTimeToFreedom(
-      passiveIncomeMonthlyConverted,
+      passiveIncomeByMonth,
       annualTotalExpenses,
-      incomeWindow.months_of_data
+      financialStats.passiveIncome.dataQuality.months_of_data
     );
 
     res.json({
       success: true,
       data: {
         passiveIncome: {
-          annual: Math.round(annualPassiveIncome * 100) / 100,
-          monthly: Math.round(monthlyPassiveIncome * 100) / 100,
-          // Breakdown as monthly averages (divide totals by months of data)
-          breakdown: {
-            dividends: Math.round((totalDividends / Math.max(incomeWindow.months_of_data, 1)) * 100) / 100,
-            rental: Math.round((totalRental / Math.max(incomeWindow.months_of_data, 1)) * 100) / 100,
-            interest: Math.round((totalInterest / Math.max(incomeWindow.months_of_data, 1)) * 100) / 100,
-            other: Math.round((totalOtherPassive / Math.max(incomeWindow.months_of_data, 1)) * 100) / 100,
-          },
-          dataQuality: {
-            confidence: incomeWindow.confidence,
-            months_of_data: incomeWindow.months_of_data,
-            warning: incomeWindow.warning,
-          },
+          annual: annualPassiveIncome,
+          monthly: monthlyPassiveIncome,
+          breakdown: financialStats.passiveIncome.breakdown,
+          dataQuality: financialStats.passiveIncome.dataQuality,
         },
         expenses: {
-          annual: Math.round(annualTotalExpenses * 100) / 100,
-          monthly: Math.round((monthlyLivingExpenses + annualDebtPayments / 12) * 100) / 100,
-          living: Math.round(annualLivingExpenses * 100) / 100,
-          debtPayments: Math.round(annualDebtPayments * 100) / 100,
+          annual: annualTotalExpenses,
+          monthly: monthlyTotalExpenses,
+          living: annualLivingExpenses,
+          debtPayments: annualDebtPayments,
           debtBreakdown,
-          dataQuality: {
-            confidence: expenseWindow.confidence,
-            months_of_data: expenseWindow.months_of_data,
-            warning: expenseWindow.warning,
-          },
+          dataQuality: financialStats.expenses.dataQuality,
         },
         flowFreedom: {
           current: Math.round(flowFreedomCurrent * 1000) / 1000,
@@ -375,7 +198,7 @@ export const getFlowFreedom = async (
         timeToFreedom: {
           years,
           confidence,
-          dataMonths: incomeWindow.months_of_data,
+          dataMonths: financialStats.passiveIncome.dataQuality.months_of_data,
           trend: {
             monthlyGrowthRate,
             direction,
@@ -386,8 +209,7 @@ export const getFlowFreedom = async (
           hasPassiveIncome: hasExcludedPassiveIncome,
           hasExpenses: hasExcludedExpenses,
         },
-        // Currency all values are converted to
-        currency: preferredCurrency,
+        currency: financialStats.currency,
       },
     });
   } catch (err) {

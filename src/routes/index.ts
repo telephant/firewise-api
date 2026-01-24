@@ -23,6 +23,7 @@ import recurringScheduleRoutes from './recurring-schedule.routes';
 import flowFreedomRoutes from './flow-freedom.routes';
 import runwayRoutes from './runway.routes';
 import assetImportRoutes from './asset-import.routes';
+import financialStatsRoutes from './financial-stats.routes';
 
 const router = Router();
 
@@ -57,5 +58,6 @@ router.use('/fire/recurring-schedules', recurringScheduleRoutes);
 router.use('/fire/flow-freedom', flowFreedomRoutes);
 router.use('/fire/runway', runwayRoutes);
 router.use('/fire/assets/import', assetImportRoutes);
+router.use('/fire/financial-stats', financialStatsRoutes);
 
 export default router;

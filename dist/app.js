@@ -10,7 +10,6 @@ const routes_1 = __importDefault(require("./routes"));
 const error_1 = require("./middleware/error");
 const logger_1 = require("./middleware/logger");
 const app = (0, express_1.default)();
-console.log('FRONTEND_URL:', process.env.FRONTEND_URL);
 // Middleware
 app.use((0, helmet_1.default)());
 app.use((0, cors_1.default)({

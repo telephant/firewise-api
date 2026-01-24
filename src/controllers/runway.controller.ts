@@ -2,14 +2,13 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, Debt } from '../types';
 import { AppError } from '../middleware/error';
-import { getUserPreferences, sumWithConversion, MoneyEntry, getExchangeRates, convertAmount } from '../utils/currency-conversion';
-import { calculateDataWindow, mapToMonthlyData, DataQuality } from '../utils/data-window';
+import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import { DataQuality } from '../utils/data-window';
+import { fetchStockPrices } from '../utils/stock-price';
+import { getFinancialStats } from '../utils/financial-stats';
 
 // Agent service URL (Railway internal network)
 const RUNWAY_AGENT_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
-
-// Passive income categories
-const PASSIVE_INCOME_CATEGORIES = ['dividend', 'rental', 'interest'];
 
 // Types matching agent service schemas
 interface GrowthRates {
@@ -188,45 +187,63 @@ export const getRunway = async (
 
 /**
  * Collect all financial data for the agent
+ * Uses shared financial stats for income/expenses, fetches assets/debts for agent
  */
 async function collectFinancialData(userId: string, preferredCurrency: string, timezone: string | null): Promise<AgentRequest> {
-  const now = new Date();
-  const twelveMonthsAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1);
-  const formatDate = (d: Date) => d.toISOString().split('T')[0];
+  // Get shared financial stats (cached)
+  const financialStats = await getFinancialStats(userId);
 
-  // Fetch all data in parallel
-  const [assetsResult, debtsResult, flowsResult, linkedLedgersResult] = await Promise.all([
+  // Fetch assets and debts for agent (need detailed breakdown)
+  const [assetsResult, debtsResult] = await Promise.all([
     supabaseAdmin.from('assets').select('*').eq('user_id', userId),
     supabaseAdmin.from('debts').select('*').eq('user_id', userId).gt('current_balance', 0),
-    supabaseAdmin
-      .from('flows')
-      .select('type, amount, currency, date, category, from_asset_id, needs_review')
-      .eq('user_id', userId)
-      .in('type', ['income', 'expense'])
-      .gte('date', formatDate(twelveMonthsAgo))
-      .neq('category', 'adjustment')
-      .eq('needs_review', false),
-    supabaseAdmin.from('fire_linked_ledgers').select('ledger_id').eq('user_id', userId),
   ]);
 
   if (assetsResult.error) throw new AppError('Failed to fetch assets', 500);
   if (debtsResult.error) throw new AppError('Failed to fetch debts', 500);
-  if (flowsResult.error) throw new AppError('Failed to fetch flows', 500);
 
   const assets = (assetsResult.data || []) as Asset[];
   const debts = (debtsResult.data || []) as Debt[];
-  const flows = flowsResult.data || [];
 
-  // Get exchange rates for conversion
+  // Fetch stock prices for stock/ETF assets (uses shared cache)
+  const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+  const tickers = stockAssets.map(a => a.ticker!);
+  const priceMap = await fetchStockPrices(tickers);
+
+  // Get exchange rates for conversion (include stock currencies)
   const allCurrencies = new Set<string>([preferredCurrency.toLowerCase()]);
   assets.forEach(a => allCurrencies.add(a.currency.toLowerCase()));
   debts.forEach(d => allCurrencies.add(d.currency.toLowerCase()));
-  flows.forEach(f => f.currency && allCurrencies.add(f.currency.toLowerCase()));
+  priceMap.forEach(result => {
+    allCurrencies.add(result.currency.toLowerCase());
+  });
   const rateMap = await getExchangeRates(Array.from(allCurrencies));
 
-  // Convert assets to preferred currency
+  // Convert assets to preferred currency (with market value for stocks)
   const agentAssets: AgentAsset[] = assets.map(asset => {
-    const conversion = convertAmount(Number(asset.balance), asset.currency, preferredCurrency, rateMap);
+    let value: number;
+    let valueCurrency: string;
+
+    // For stock/ETF: calculate market value = shares × price
+    if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
+      const stockPrice = priceMap.get(asset.ticker);
+      if (stockPrice) {
+        value = Number(asset.balance) * stockPrice.price;
+        valueCurrency = stockPrice.currency;
+      } else {
+        // No price available - skip this asset or use 0
+        value = 0;
+        valueCurrency = preferredCurrency;
+      }
+    } else {
+      // For other assets: balance is already the value
+      value = Number(asset.balance);
+      valueCurrency = asset.currency;
+    }
+
+    // Convert to preferred currency
+    const conversion = convertAmount(value, valueCurrency, preferredCurrency, rateMap);
+
     // Get growth_rates from dedicated column (extract only 5y and 10y)
     const growthRates: GrowthRates | null = asset.growth_rates ? {
       '5y': asset.growth_rates['5y'] ?? null,
@@ -238,7 +255,7 @@ async function collectFinancialData(userId: string, preferredCurrency: string, t
       name: asset.name,
       type: asset.type,
       ticker: asset.ticker,
-      balance: conversion ? Math.round(conversion.converted * 100) / 100 : Number(asset.balance),
+      balance: conversion ? Math.round(conversion.converted * 100) / 100 : value,
       currency: preferredCurrency,
       growth_rates: growthRates,
     };
@@ -258,128 +275,40 @@ async function collectFinancialData(userId: string, preferredCurrency: string, t
     };
   });
 
-  // Calculate passive income and expenses
-  const passiveIncomeEntries: MoneyEntry[] = [];
-  const expenseEntries: MoneyEntry[] = [];
-  const passiveIncomeByMonth = new Map<string, MoneyEntry[]>();
-  const expensesByMonth = new Map<string, MoneyEntry[]>();
-
-  flows.forEach(flow => {
-    const monthKey = flow.date.substring(0, 7);
-
-    if (flow.type === 'income') {
-      const isPassive = flow.from_asset_id !== null || PASSIVE_INCOME_CATEGORIES.includes(flow.category || '');
-      if (isPassive) {
-        const entry: MoneyEntry = { amount: Number(flow.amount), currency: flow.currency || 'USD' };
-        passiveIncomeEntries.push(entry);
-        const monthEntries = passiveIncomeByMonth.get(monthKey) || [];
-        monthEntries.push(entry);
-        passiveIncomeByMonth.set(monthKey, monthEntries);
-      }
-    } else if (flow.type === 'expense') {
-      const entry: MoneyEntry = { amount: Number(flow.amount), currency: flow.currency || 'USD' };
-      expenseEntries.push(entry);
-      const monthEntries = expensesByMonth.get(monthKey) || [];
-      monthEntries.push(entry);
-      expensesByMonth.set(monthKey, monthEntries);
-    }
-  });
-
-  // Fetch linked ledger expenses
-  const linkedLedgerIds = (linkedLedgersResult.data || []).map(l => l.ledger_id);
-  if (linkedLedgerIds.length > 0) {
-    const { data: linkedExpenses } = await supabaseAdmin
-      .from('expenses')
-      .select(`amount, date, currency_id, ledger_currencies!currency_id(code)`)
-      .in('ledger_id', linkedLedgerIds)
-      .gte('date', formatDate(twelveMonthsAgo));
-
-    (linkedExpenses || []).forEach(exp => {
-      const currency = exp.ledger_currencies as unknown as { code: string } | null;
-      const entry: MoneyEntry = { amount: Number(exp.amount), currency: currency?.code || 'USD' };
-      expenseEntries.push(entry);
-      const monthKey = exp.date.substring(0, 7);
-      const monthEntries = expensesByMonth.get(monthKey) || [];
-      monthEntries.push(entry);
-      expensesByMonth.set(monthKey, monthEntries);
-    });
-  }
-
-  // Convert monthly Maps to currency-converted totals for data window calculation
-  const passiveIncomeMonthlyConverted = new Map<string, number>();
-  for (const [month, entries] of passiveIncomeByMonth) {
-    const converted = await sumWithConversion(entries, preferredCurrency);
-    passiveIncomeMonthlyConverted.set(month, converted);
-  }
-
-  const expensesMonthlyConverted = new Map<string, number>();
-  for (const [month, entries] of expensesByMonth) {
-    const converted = await sumWithConversion(entries, preferredCurrency);
-    expensesMonthlyConverted.set(month, converted);
-  }
-
-  // Use data window utility for consistent calculation and confidence
-  const incomeWindow = calculateDataWindow(mapToMonthlyData(passiveIncomeMonthlyConverted));
-  const expenseWindow = calculateDataWindow(mapToMonthlyData(expensesMonthlyConverted));
-
-  // Calculate total monthly debt payments (already converted to preferred currency)
-  const monthlyDebtPayments = agentDebts.reduce((sum, d) => sum + d.monthly_payment, 0);
-
-  // Total monthly expenses = living expenses + debt payments (consistent with flow-freedom)
-  const totalMonthlyExpenses = expenseWindow.monthly_average + monthlyDebtPayments;
-  const totalAnnualExpenses = expenseWindow.annualized + (monthlyDebtPayments * 12);
-
-  // Calculate net worth
+  // Calculate net worth from assets and debts
   const totalAssets = agentAssets.reduce((sum, a) => sum + a.balance, 0);
   const totalDebts = agentDebts.reduce((sum, d) => sum + d.current_balance, 0);
   const netWorth = totalAssets - totalDebts;
 
-  // Calculate gap (expenses - income = what you need to withdraw)
-  const monthlyGap = totalMonthlyExpenses - incomeWindow.monthly_average;
-  const annualGap = totalAnnualExpenses - incomeWindow.annualized;
+  // Use living expenses from shared stats (debt payments handled separately by agent)
+  const monthlyLivingExpenses = financialStats.expenses.living / 12;
+  const annualLivingExpenses = financialStats.expenses.living;
 
-  // Build compressed monthly history (combines both Maps)
-  const allMonths = new Set([
-    ...passiveIncomeMonthlyConverted.keys(),
-    ...expensesMonthlyConverted.keys(),
-  ]);
-  const monthlyHistory: MonthlyStats[] = Array.from(allMonths)
-    .sort()
-    .map(month => ({
-      month,
-      income: Math.round((passiveIncomeMonthlyConverted.get(month) || 0) * 100) / 100,
-      expenses: Math.round((expensesMonthlyConverted.get(month) || 0) * 100) / 100,
-    }));
+  // Calculate gap (expenses - income = what you need to withdraw)
+  const monthlyGap = monthlyLivingExpenses - financialStats.passiveIncome.monthly;
+  const annualGap = annualLivingExpenses - financialStats.passiveIncome.annual;
 
   return {
     assets: agentAssets,
     debts: agentDebts,
-    // Monthly values (primary display) - includes debt payments
-    monthly_passive_income: incomeWindow.monthly_average,
-    monthly_expenses: Math.round(totalMonthlyExpenses * 100) / 100,
+    // Monthly values from shared stats
+    monthly_passive_income: financialStats.passiveIncome.monthly,
+    monthly_expenses: Math.round(monthlyLivingExpenses * 100) / 100,
     monthly_gap: Math.round(monthlyGap * 100) / 100,
-    // Annual values (for agent calculation) - includes debt payments
-    annual_passive_income: incomeWindow.annualized,
-    annual_expenses: Math.round(totalAnnualExpenses * 100) / 100,
+    // Annual values from shared stats
+    annual_passive_income: financialStats.passiveIncome.annual,
+    annual_expenses: Math.round(annualLivingExpenses * 100) / 100,
     annual_gap: Math.round(annualGap * 100) / 100,
-    // Monthly breakdown (compressed - just totals per month)
-    monthly_history: monthlyHistory,
-    // Net worth
+    // Monthly breakdown from shared stats
+    monthly_history: financialStats.monthlyHistory,
+    // Net worth (calculated from assets - debts)
     net_worth: Math.round(netWorth * 100) / 100,
-    currency: preferredCurrency,
+    currency: financialStats.currency,
     // User's region for inflation rate
     timezone,
     data_quality: {
-      income: {
-        confidence: incomeWindow.confidence,
-        months_of_data: incomeWindow.months_of_data,
-        warning: incomeWindow.warning,
-      },
-      expenses: {
-        confidence: expenseWindow.confidence,
-        months_of_data: expenseWindow.months_of_data,
-        warning: expenseWindow.warning,
-      },
+      income: financialStats.passiveIncome.dataQuality,
+      expenses: financialStats.expenses.dataQuality,
     },
   };
 }

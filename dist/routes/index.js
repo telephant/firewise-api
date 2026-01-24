@@ -28,6 +28,7 @@ const recurring_schedule_routes_1 = __importDefault(require("./recurring-schedul
 const flow_freedom_routes_1 = __importDefault(require("./flow-freedom.routes"));
 const runway_routes_1 = __importDefault(require("./runway.routes"));
 const asset_import_routes_1 = __importDefault(require("./asset-import.routes"));
+const financial_stats_routes_1 = __importDefault(require("./financial-stats.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
@@ -57,5 +58,6 @@ router.use('/fire/recurring-schedules', recurring_schedule_routes_1.default);
 router.use('/fire/flow-freedom', flow_freedom_routes_1.default);
 router.use('/fire/runway', runway_routes_1.default);
 router.use('/fire/assets/import', asset_import_routes_1.default);
+router.use('/fire/financial-stats', financial_stats_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map
