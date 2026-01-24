@@ -9,6 +9,7 @@ import { getFinancialStats } from '../utils/financial-stats';
 
 // Agent service URL (Railway internal network)
 const RUNWAY_AGENT_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
+console.log('[Runway] Agent URL configured as:', RUNWAY_AGENT_URL);
 
 // Types matching agent service schemas
 interface GrowthRates {
@@ -317,8 +318,10 @@ async function collectFinancialData(userId: string, preferredCurrency: string, t
  * Call the runway agent service
  */
 async function callAgentService(request: AgentRequest): Promise<AgentProjection> {
+  const agentUrl = `${RUNWAY_AGENT_URL}/runway/`;
+  console.log('[Runway] Calling agent service at:', agentUrl);
   try {
-    const response = await fetch(`${RUNWAY_AGENT_URL}/runway/`, {
+    const response = await fetch(agentUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
