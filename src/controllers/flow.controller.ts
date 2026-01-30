@@ -14,6 +14,7 @@ import {
 } from '../types';
 import { AppError } from '../middleware/error';
 import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
 // Note: Asset/debt balances are managed explicitly by the application
 // Balance triggers were removed in migration 034_remove_balance_triggers.sql
@@ -27,6 +28,7 @@ export const getFlows = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const {
       page = '1',
       limit = '20',
@@ -42,13 +44,15 @@ export const getFlows = async (
     const limitNum = Math.min(parseInt(limit as string, 10) || 20, 500); // Increased max limit
     const offset = (pageNum - 1) * limitNum;
 
-    // Build query
+    // Build query with family/personal context
     let query = supabaseAdmin
       .from('flows')
       .select('*', { count: 'exact' })
-      .eq('user_id', userId)
       .order('date', { ascending: false })
       .order('created_at', { ascending: false });
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
 
     if (type) query = query.eq('type', type);
     if (start_date) query = query.gte('date', start_date);
@@ -121,14 +125,14 @@ export const getFlow = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    const { data: flow, error } = await supabaseAdmin
-      .from('flows')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Build query with family/personal context
+    let query = supabaseAdmin.from('flows').select('*');
+    query = applyOwnershipFilterWithId(query, id, viewContext);
+
+    const { data: flow, error } = await query.single();
 
     if (error || !flow) {
       res.status(404).json({ success: false, error: 'Flow not found' });
@@ -181,6 +185,7 @@ export const createFlow = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const {
       type,
       amount,
@@ -243,19 +248,20 @@ export const createFlow = async (
       }
     }
 
-    // Verify assets, debt, and expense category belong to user (parallel checks)
+    // Verify assets, debt, and expense category belong to user/family (parallel checks)
+    // Simple validation using belong_id filter
     const [fromAssetResult, toAssetResult, debtResult, expenseCategoryResult] = await Promise.all([
       from_asset_id
-        ? supabaseAdmin.from('assets').select('id').eq('id', from_asset_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('id'), from_asset_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       to_asset_id
-        ? supabaseAdmin.from('assets').select('id').eq('id', to_asset_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('id'), to_asset_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       debt_id
-        ? supabaseAdmin.from('debts').select('id').eq('id', debt_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('debts').select('id'), debt_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       flow_expense_category_id
-        ? supabaseAdmin.from('flow_expense_categories').select('id').eq('id', flow_expense_category_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('flow_expense_categories').select('id'), flow_expense_category_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
     ]);
 
@@ -279,6 +285,9 @@ export const createFlow = async (
       return;
     }
 
+    // Get ownership values based on view mode (personal or family)
+    const ownershipValues = buildOwnershipValues(viewContext);
+
     // Create recurring schedule FIRST if recurring_frequency is set (for consistency)
     let scheduleId: string | null = null;
     if (recurring_frequency && recurring_frequency !== 'none') {
@@ -301,7 +310,7 @@ export const createFlow = async (
       const { data: schedule, error: scheduleError } = await supabaseAdmin
         .from('recurring_schedules')
         .insert({
-          user_id: userId,
+          ...ownershipValues,
           source_flow_id: null, // Will update after flow is created
           frequency: recurring_frequency,
           next_run_date: nextRunDate,
@@ -323,7 +332,7 @@ export const createFlow = async (
     const { data: flow, error } = await supabaseAdmin
       .from('flows')
       .insert({
-        user_id: userId,
+        ...ownershipValues,
         type,
         amount: parseFloat(amount),
         currency: currency || 'USD',
@@ -475,6 +484,7 @@ export const updateFlow = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
     const {
       type,
@@ -493,13 +503,11 @@ export const updateFlow = async (
       adjust_balances, // New flag to adjust related asset balances
     } = req.body;
 
-    // Check if flow exists and belongs to user
-    const { data: existingFlow, error: fetchError } = await supabaseAdmin
-      .from('flows')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if flow exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('flows').select('*');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existingFlow, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existingFlow) {
       res.status(404).json({ success: false, error: 'Flow not found' });
@@ -542,24 +550,25 @@ export const updateFlow = async (
       }
     }
 
-    // Verify new assets, debt, and expense category belong to user (parallel checks)
+    // Verify new assets, debt, and expense category belong to user/family (parallel checks)
     const checkFromAsset = from_asset_id !== undefined && from_asset_id !== null;
     const checkToAsset = to_asset_id !== undefined && to_asset_id !== null;
     const checkDebt = debt_id !== undefined && debt_id !== null;
     const checkExpenseCategory = flow_expense_category_id !== undefined && flow_expense_category_id !== null;
 
+    // Simple validation using belong_id filter
     const [fromAssetResult, toAssetResult, debtResult, expenseCategoryResult] = await Promise.all([
       checkFromAsset
-        ? supabaseAdmin.from('assets').select('id').eq('id', from_asset_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('id'), from_asset_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       checkToAsset
-        ? supabaseAdmin.from('assets').select('id').eq('id', to_asset_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('id'), to_asset_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       checkDebt
-        ? supabaseAdmin.from('debts').select('id').eq('id', debt_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('debts').select('id'), debt_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
       checkExpenseCategory
-        ? supabaseAdmin.from('flow_expense_categories').select('id').eq('id', flow_expense_category_id).eq('user_id', userId).single()
+        ? applyOwnershipFilterWithId(supabaseAdmin.from('flow_expense_categories').select('id'), flow_expense_category_id, viewContext).single()
         : Promise.resolve({ data: { id: null } }),
     ]);
 
@@ -632,11 +641,12 @@ export const updateFlow = async (
           throw new AppError('Failed to update recurring schedule', 500);
         }
       } else {
-        // Create new schedule first
+        // Create new schedule first with ownership values
+        const ownershipValues = buildOwnershipValues(viewContext);
         const { data: schedule, error: scheduleError } = await supabaseAdmin
           .from('recurring_schedules')
           .insert({
-            user_id: userId,
+            ...ownershipValues,
             source_flow_id: id,
             frequency: recurring_frequency,
             next_run_date: nextRunDate,
@@ -771,15 +781,14 @@ export const deleteFlow = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    // Check if flow exists and belongs to user
-    const { data: existingFlow, error: fetchError } = await supabaseAdmin
-      .from('flows')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if flow exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('flows').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existingFlow, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existingFlow) {
       res.status(404).json({ success: false, error: 'Flow not found' });
@@ -808,6 +817,7 @@ export const getFlowStats = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { start_date, end_date, currency = 'USD' } = req.query as {
       start_date?: string;
       end_date?: string;
@@ -823,13 +833,17 @@ export const getFlowStats = async (
     const endDate = end_date || defaultEndDate;
 
     // Get all flows in the date range (excluding adjustments which are balance corrections)
-    const { data: flows, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('flows')
       .select('type, amount, currency, category')
-      .eq('user_id', userId)
       .gte('date', startDate)
       .lte('date', endDate)
       .neq('category', 'adjustment');
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
+
+    const { data: flows, error } = await query;
 
     if (error) {
       throw new AppError('Failed to fetch flow stats', 500);
@@ -874,15 +888,14 @@ export const markFlowReviewed = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    // Check if flow exists and belongs to user
-    const { data: existingFlow, error: fetchError } = await supabaseAdmin
-      .from('flows')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if flow exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('flows').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existingFlow, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existingFlow) {
       res.status(404).json({ success: false, error: 'Flow not found' });
@@ -916,12 +929,17 @@ export const getFlowsNeedingReviewCount = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
 
-    const { count, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('flows')
       .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
       .eq('needs_review', true);
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
+
+    const { count, error } = await query;
 
     if (error) {
       throw new AppError('Failed to fetch review count', 500);

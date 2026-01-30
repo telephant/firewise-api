@@ -2,8 +2,9 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, FlowExpenseCategory } from '../types';
 import { AppError } from '../middleware/error';
+import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
-// Get all expense categories for the authenticated user
+// Get all expense categories for the authenticated user/family
 export const getFlowExpenseCategories = async (
   req: AuthenticatedRequest,
   res: Response<ApiResponse<FlowExpenseCategory[]>>
@@ -15,19 +16,26 @@ export const getFlowExpenseCategories = async (
       return;
     }
 
-    const { data: categories, error } = await supabaseAdmin
+    const viewContext = await getViewContext(req);
+
+    // Build query with family/personal context
+    let query = supabaseAdmin
       .from('flow_expense_categories')
       .select('*')
-      .eq('user_id', userId)
       .order('sort_order', { ascending: true });
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
+
+    const { data: categories, error } = await query;
 
     if (error) {
       console.error('Error fetching flow expense categories:', error);
       throw new AppError('Failed to fetch expense categories', 500);
     }
 
-    // If no categories exist, seed default ones
-    if (!categories || categories.length === 0) {
+    // If no categories exist and in personal mode, seed default ones
+    if ((!categories || categories.length === 0) && viewContext.viewMode === 'personal') {
       const { error: seedError } = await supabaseAdmin.rpc(
         'seed_default_flow_expense_categories',
         { p_user_id: userId }
@@ -39,11 +47,13 @@ export const getFlowExpenseCategories = async (
       }
 
       // Fetch again after seeding
-      const { data: seededCategories, error: refetchError } = await supabaseAdmin
+      let refetchQuery = supabaseAdmin
         .from('flow_expense_categories')
         .select('*')
-        .eq('user_id', userId)
         .order('sort_order', { ascending: true });
+      refetchQuery = applyOwnershipFilter(refetchQuery, viewContext);
+
+      const { data: seededCategories, error: refetchError } = await refetchQuery;
 
       if (refetchError) {
         throw new AppError('Failed to fetch expense categories', 500);
@@ -53,7 +63,7 @@ export const getFlowExpenseCategories = async (
       return;
     }
 
-    res.json({ success: true, data: categories });
+    res.json({ success: true, data: categories || [] });
   } catch (err) {
     if (err instanceof AppError) throw err;
     console.error('Error in getFlowExpenseCategories:', err);
@@ -73,6 +83,7 @@ export const createFlowExpenseCategory = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
     const { name, icon, color } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -80,34 +91,36 @@ export const createFlowExpenseCategory = async (
       return;
     }
 
-    // Check if category already exists
-    const { data: existing } = await supabaseAdmin
-      .from('flow_expense_categories')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('name', name.trim())
-      .single();
+    // Check if category already exists for this user/family (using belong_id)
+    const { data: existing } = await applyOwnershipFilter(
+      supabaseAdmin.from('flow_expense_categories').select('id'),
+      viewContext
+    ).eq('name', name.trim()).single();
 
     if (existing) {
       res.status(400).json({ success: false, error: 'Category already exists' });
       return;
     }
 
-    // Get max sort_order
-    const { data: maxOrder } = await supabaseAdmin
+    // Get max sort_order for this user/family
+    let maxOrderQuery = supabaseAdmin
       .from('flow_expense_categories')
       .select('sort_order')
-      .eq('user_id', userId)
       .order('sort_order', { ascending: false })
-      .limit(1)
-      .single();
+      .limit(1);
+    maxOrderQuery = applyOwnershipFilter(maxOrderQuery, viewContext);
+
+    const { data: maxOrder } = await maxOrderQuery.single();
 
     const nextOrder = (maxOrder?.sort_order || 0) + 1;
+
+    // Get ownership values based on view mode (personal or family)
+    const ownershipValues = buildOwnershipValues(viewContext);
 
     const { data: category, error } = await supabaseAdmin
       .from('flow_expense_categories')
       .insert({
-        user_id: userId,
+        ...ownershipValues,
         name: name.trim(),
         icon: icon || null,
         color: color || null,
@@ -141,28 +154,27 @@ export const updateFlowExpenseCategory = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
     const { name, icon, color, sort_order } = req.body;
 
-    // Check if category exists and belongs to user
-    const { data: existing, error: fetchError } = await supabaseAdmin
-      .from('flow_expense_categories')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if category exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('flow_expense_categories').select('*');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existing, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existing) {
       res.status(404).json({ success: false, error: 'Category not found' });
       return;
     }
 
-    // If updating name, check for duplicates
+    // If updating name, check for duplicates (using belong_id)
     if (name && name.trim() !== existing.name) {
-      const { data: duplicate } = await supabaseAdmin
-        .from('flow_expense_categories')
-        .select('id')
-        .eq('user_id', userId)
+      const { data: duplicate } = await applyOwnershipFilter(
+        supabaseAdmin.from('flow_expense_categories').select('id'),
+        viewContext
+      )
         .eq('name', name.trim())
         .neq('id', id)
         .single();
@@ -211,15 +223,14 @@ export const deleteFlowExpenseCategory = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    // Check if category exists and belongs to user
-    const { data: existing, error: fetchError } = await supabaseAdmin
-      .from('flow_expense_categories')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if category exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('flow_expense_categories').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existing, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existing) {
       res.status(404).json({ success: false, error: 'Category not found' });

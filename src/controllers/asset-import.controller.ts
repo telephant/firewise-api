@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, AssetType } from '../types';
 import { AppError } from '../middleware/error';
+import { getViewContext, applyOwnershipFilter, buildOwnershipValues } from '../utils/family-context';
 
 // Agent service URL (same as runway agent - now multi-agent service)
 const AGENT_SERVICE_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
@@ -103,12 +104,14 @@ export const analyzeImport = async (
     // Call agent service for extraction
     const agentResponse = await callImportAgent(file, fileType, fileName);
 
-    // Get existing assets with tickers to check for duplicates
-    const { data: existingAssets } = await supabaseAdmin
-      .from('assets')
-      .select('id, name, ticker, balance')
-      .eq('user_id', userId)
-      .not('ticker', 'is', null);
+    // Get view context for family/personal mode
+    const viewContext = await getViewContext(req);
+
+    // Get existing assets with tickers to check for duplicates (using belong_id filter)
+    const { data: existingAssets } = await applyOwnershipFilter(
+      supabaseAdmin.from('assets').select('id, name, ticker, balance'),
+      viewContext
+    ).not('ticker', 'is', null);
 
     // Build map of existing tickers
     const existingTickers: Record<string, { asset_id: string; name: string; balance: number }> = {};
@@ -166,12 +169,14 @@ export const confirmImport = async (
       return;
     }
 
-    // Get existing assets with tickers
-    const { data: existingAssets } = await supabaseAdmin
-      .from('assets')
-      .select('id, ticker, balance')
-      .eq('user_id', userId)
-      .not('ticker', 'is', null);
+    // Get view context for family/personal mode
+    const viewContext = await getViewContext(req);
+
+    // Get existing assets with tickers (using belong_id filter)
+    const { data: existingAssets } = await applyOwnershipFilter(
+      supabaseAdmin.from('assets').select('id, ticker, balance'),
+      viewContext
+    ).not('ticker', 'is', null);
 
     const existingByTicker = new Map<string, { id: string; balance: number }>();
     (existingAssets || []).forEach((asset) => {
@@ -212,9 +217,10 @@ export const confirmImport = async (
         }
         updated++;
       } else {
-        // Create new asset
+        // Create new asset with ownership values (user_id + belong_id)
+        const ownershipValues = buildOwnershipValues(viewContext);
         const newAsset = {
-          user_id: userId,
+          ...ownershipValues,
           name: asset.name,
           type: asset.type,
           ticker: asset.ticker,

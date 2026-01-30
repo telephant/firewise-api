@@ -301,3 +301,53 @@ export interface ProcessRecurringResult {
   created_flows: string[];
   errors: { schedule_id: string; error: string }[];
 }
+
+// Family sharing types
+export interface Family {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FamilyMember {
+  id: string;
+  family_id: string;
+  user_id: string;
+  joined_at: string;
+  // Joined profile data
+  profile?: {
+    full_name: string | null;
+    email: string | null;
+    avatar_url: string | null;
+  };
+}
+
+export interface FamilyInvitation {
+  id: string;
+  family_id: string;
+  email: string;
+  token: string;
+  invited_by: string;
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+}
+
+export interface FamilyWithMembers extends Family {
+  members: FamilyMember[];
+}
+
+export interface CreateFamilyRequest {
+  name: string;
+  migrate_data?: boolean; // If true, migrate existing personal data to family
+}
+
+export interface InviteMemberRequest {
+  email: string;
+}
+
+export interface AcceptInvitationRequest {
+  migrate_data?: boolean; // If true, migrate existing personal data to family
+}

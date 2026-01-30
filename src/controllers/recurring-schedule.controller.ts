@@ -10,6 +10,7 @@ import {
   ScheduleFrequency,
 } from '../types';
 import { AppError } from '../middleware/error';
+import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
 /**
  * Get all recurring schedules for the authenticated user
@@ -20,6 +21,7 @@ export const getSchedules = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { page = '1', limit = '50', is_active, frequency } = req.query as unknown as RecurringScheduleFilters & {
       page: string;
       limit: string;
@@ -29,11 +31,14 @@ export const getSchedules = async (
     const limitNum = Math.min(parseInt(limit as string, 10) || 50, 100);
     const offset = (pageNum - 1) * limitNum;
 
+    // Build query with family/personal context
     let query = supabaseAdmin
       .from('recurring_schedules')
       .select('*', { count: 'exact' })
-      .eq('user_id', userId)
       .order('next_run_date', { ascending: true });
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
 
     if (is_active !== undefined) {
       query = query.eq('is_active', String(is_active) === 'true');
@@ -73,14 +78,14 @@ export const getSchedule = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    const { data: schedule, error } = await supabaseAdmin
-      .from('recurring_schedules')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Build query with family/personal context
+    let query = supabaseAdmin.from('recurring_schedules').select('*');
+    query = applyOwnershipFilterWithId(query, id, viewContext);
+
+    const { data: schedule, error } = await query.single();
 
     if (error || !schedule) {
       res.status(404).json({ success: false, error: 'Recurring schedule not found' });
@@ -106,6 +111,7 @@ export const createSchedule = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { source_flow_id, frequency, next_run_date, flow_template } = req.body;
 
     // Validation
@@ -132,14 +138,14 @@ export const createSchedule = async (
       return;
     }
 
-    // Verify source_flow_id belongs to user if provided
+    // Verify source_flow_id belongs to user/family if provided
     if (source_flow_id) {
-      const { data: sourceFlow, error: flowError } = await supabaseAdmin
+      let sourceQuery = supabaseAdmin
         .from('flows')
         .select('id')
-        .eq('id', source_flow_id)
-        .eq('user_id', userId)
-        .single();
+        .eq('id', source_flow_id);
+      sourceQuery = applyOwnershipFilter(sourceQuery, viewContext);
+      const { data: sourceFlow, error: flowError } = await sourceQuery.single();
 
       if (flowError || !sourceFlow) {
         res.status(400).json({ success: false, error: 'Source flow not found' });
@@ -147,10 +153,13 @@ export const createSchedule = async (
       }
     }
 
+    // Get ownership values based on view mode (personal or family)
+    const ownershipValues = buildOwnershipValues(viewContext);
+
     const { data: schedule, error } = await supabaseAdmin
       .from('recurring_schedules')
       .insert({
-        user_id: userId,
+        ...ownershipValues,
         source_flow_id: source_flow_id || null,
         frequency,
         next_run_date,
@@ -180,16 +189,15 @@ export const updateSchedule = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
     const { frequency, next_run_date, is_active, flow_template } = req.body;
 
-    // Check if schedule exists and belongs to user
-    const { data: existingSchedule, error: fetchError } = await supabaseAdmin
-      .from('recurring_schedules')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if schedule exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('recurring_schedules').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existingSchedule, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existingSchedule) {
       res.status(404).json({ success: false, error: 'Recurring schedule not found' });
@@ -238,15 +246,14 @@ export const deleteSchedule = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    // Check if schedule exists and belongs to user
-    const { data: existingSchedule, error: fetchError } = await supabaseAdmin
-      .from('recurring_schedules')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Check if schedule exists and belongs to user/family
+    let checkQuery = supabaseAdmin.from('recurring_schedules').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: existingSchedule, error: fetchError } = await checkQuery.single();
 
     if (fetchError || !existingSchedule) {
       res.status(404).json({ success: false, error: 'Recurring schedule not found' });
@@ -275,15 +282,14 @@ export const getScheduleFlows = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const { id } = req.params;
 
-    // Verify schedule belongs to user
-    const { data: schedule, error: scheduleError } = await supabaseAdmin
-      .from('recurring_schedules')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single();
+    // Verify schedule belongs to user/family
+    let checkQuery = supabaseAdmin.from('recurring_schedules').select('id');
+    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
+
+    const { data: schedule, error: scheduleError } = await checkQuery.single();
 
     if (scheduleError || !schedule) {
       res.status(404).json({ success: false, error: 'Recurring schedule not found' });
@@ -325,15 +331,20 @@ export const processRecurring = async (
 ): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
     const today = new Date().toISOString().split('T')[0];
 
-    // Find all active schedules due to run (next_run_date <= today)
-    const { data: dueSchedules, error: fetchError } = await supabaseAdmin
+    // Find all active schedules due to run (next_run_date <= today) for this user/family
+    let query = supabaseAdmin
       .from('recurring_schedules')
       .select('*')
-      .eq('user_id', userId)
       .eq('is_active', true)
       .lte('next_run_date', today);
+
+    // Apply ownership filter (family or personal)
+    query = applyOwnershipFilter(query, viewContext);
+
+    const { data: dueSchedules, error: fetchError } = await query;
 
     if (fetchError) {
       throw new AppError('Failed to fetch due schedules', 500);
@@ -350,16 +361,20 @@ export const processRecurring = async (
       return;
     }
 
+    // Get ownership values for creating flows
+    const ownershipValues = buildOwnershipValues(viewContext);
+
     // Process each due schedule
     for (const schedule of dueSchedules) {
       try {
         const template = schedule.flow_template as FlowTemplate;
 
-        // Create the flow
+        // Create the flow with same ownership as the schedule (using belong_id model)
         const { data: newFlow, error: flowError } = await supabaseAdmin
           .from('flows')
           .insert({
-            user_id: userId,
+            user_id: schedule.user_id,
+            belong_id: schedule.belong_id,
             type: template.type,
             amount: template.amount,
             currency: template.currency,

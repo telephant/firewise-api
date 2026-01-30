@@ -122,17 +122,6 @@ export function getWarning(months: number): string | null {
 }
 
 /**
- * Extract data quality metadata (for embedding in API responses)
- */
-export function getDataQuality(months: number): DataQuality {
-  return {
-    confidence: getConfidence(months),
-    months_of_data: months,
-    warning: getWarning(months),
-  };
-}
-
-/**
  * Main calculation function - calculates data window statistics
  *
  * @param monthlyData - Array of monthly totals (already currency-converted)

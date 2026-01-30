@@ -4,6 +4,7 @@ import { AuthenticatedRequest, ApiResponse, Debt } from '../types';
 import { AppError } from '../middleware/error';
 import { DataQuality, ConfidenceLevel } from '../utils/data-window';
 import { getFinancialStats } from '../utils/financial-stats';
+import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
 
 // Debt item for breakdown
 interface DebtBreakdownItem {
@@ -73,29 +74,34 @@ export const getFlowFreedom = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
+
     // Get shared financial stats (cached)
-    const financialStats = await getFinancialStats(userId);
+    const financialStats = await getFinancialStats(viewContext);
 
     // Calculate date range for pending review check
     const now = new Date();
     const twelveMonthsAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1);
     const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
+    // Build queries with ownership filter (simple belong_id)
+    const debtsQuery = applyOwnershipFilter(
+      supabaseAdmin.from('debts').select('*'),
+      viewContext
+    ).gt('current_balance', 0);
+
+    const pendingQuery = applyOwnershipFilter(
+      supabaseAdmin.from('flows').select('type, category, from_asset_id, needs_review'),
+      viewContext
+    )
+      .eq('needs_review', true)
+      .in('type', ['income', 'expense'])
+      .gte('date', formatDate(twelveMonthsAgo));
+
     // Fetch debts for payoff calculation and pending review flows
     const [debtsResult, pendingReviewResult] = await Promise.all([
-      supabaseAdmin
-        .from('debts')
-        .select('*')
-        .eq('user_id', userId)
-        .gt('current_balance', 0),
-      // Get flows needing review (for pendingReview stats)
-      supabaseAdmin
-        .from('flows')
-        .select('type, category, from_asset_id, needs_review')
-        .eq('user_id', userId)
-        .eq('needs_review', true)
-        .in('type', ['income', 'expense'])
-        .gte('date', formatDate(twelveMonthsAgo)),
+      debtsQuery,
+      pendingQuery,
     ]);
 
     const debts = (debtsResult.data || []) as Debt[];

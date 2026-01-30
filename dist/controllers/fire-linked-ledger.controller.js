@@ -3,7 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.setFireLinkedLedgers = exports.getFireLinkedLedgers = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
-// Get all linked ledgers for the authenticated user
+const family_context_1 = require("../utils/family-context");
+// Get all linked ledgers for the authenticated user/family
 const getFireLinkedLedgers = async (req, res) => {
     try {
         const userId = req.user?.id;
@@ -11,13 +12,12 @@ const getFireLinkedLedgers = async (req, res) => {
             res.status(401).json({ success: false, error: 'Unauthorized' });
             return;
         }
-        const { data: linkedLedgers, error } = await supabase_1.supabaseAdmin
-            .from('fire_linked_ledgers')
-            .select(`
+        // Get view context for family/personal mode
+        const viewContext = await (0, family_context_1.getViewContext)(req);
+        const { data: linkedLedgers, error } = await (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('fire_linked_ledgers').select(`
         *,
         ledger:ledgers(id, name, description)
-      `)
-            .eq('user_id', userId);
+      `), viewContext);
         if (error) {
             console.error('Error fetching fire linked ledgers:', error);
             throw new error_1.AppError('Failed to fetch linked ledgers', 500);
@@ -32,7 +32,7 @@ const getFireLinkedLedgers = async (req, res) => {
     }
 };
 exports.getFireLinkedLedgers = getFireLinkedLedgers;
-// Set linked ledgers (replaces all existing links)
+// Set linked ledgers (replaces all existing links for user/family)
 const setFireLinkedLedgers = async (req, res) => {
     try {
         const userId = req.user?.id;
@@ -52,11 +52,13 @@ const setFireLinkedLedgers = async (req, res) => {
                 return;
             }
         }
-        // Delete all existing links for this user
+        // Get view context for family/personal mode
+        const viewContext = await (0, family_context_1.getViewContext)(req);
+        // Delete all existing links for this user/family (based on belong_id)
         const { error: deleteError } = await supabase_1.supabaseAdmin
             .from('fire_linked_ledgers')
             .delete()
-            .eq('user_id', userId);
+            .eq('belong_id', viewContext.belongId);
         if (deleteError) {
             console.error('Error deleting existing linked ledgers:', deleteError);
             throw new error_1.AppError('Failed to update linked ledgers', 500);
@@ -66,9 +68,10 @@ const setFireLinkedLedgers = async (req, res) => {
             res.json({ success: true, data: [] });
             return;
         }
-        // Insert new links
+        // Insert new links with ownership values
+        const ownershipValues = (0, family_context_1.buildOwnershipValues)(viewContext);
         const inserts = ledger_ids.map((ledger_id) => ({
-            user_id: userId,
+            ...ownershipValues,
             ledger_id,
         }));
         const { data: newLinks, error: insertError } = await supabase_1.supabaseAdmin

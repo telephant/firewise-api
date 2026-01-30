@@ -6,6 +6,7 @@ import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/cu
 import { DataQuality } from '../utils/data-window';
 import { fetchStockPrices } from '../utils/stock-price';
 import { getFinancialStats } from '../utils/financial-stats';
+import { getViewContext, applyOwnershipFilter, ViewContext } from '../utils/family-context';
 
 // Agent service URL (Railway internal network)
 const RUNWAY_AGENT_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
@@ -142,6 +143,8 @@ export const getRunway = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
+
     // Get timezone from query param (sent by frontend)
     const timezone = (req.query.timezone as string) || null;
 
@@ -150,7 +153,7 @@ export const getRunway = async (
     const preferredCurrency = userPrefs?.preferred_currency || 'USD';
 
     // Collect all data
-    const agentRequest = await collectFinancialData(userId, preferredCurrency, timezone);
+    const agentRequest = await collectFinancialData(viewContext, preferredCurrency, timezone);
 
     // Call agent service
     const agentProjection = await callAgentService(agentRequest);
@@ -190,14 +193,25 @@ export const getRunway = async (
  * Collect all financial data for the agent
  * Uses shared financial stats for income/expenses, fetches assets/debts for agent
  */
-async function collectFinancialData(userId: string, preferredCurrency: string, timezone: string | null): Promise<AgentRequest> {
+async function collectFinancialData(viewContext: ViewContext, preferredCurrency: string, timezone: string | null): Promise<AgentRequest> {
   // Get shared financial stats (cached)
-  const financialStats = await getFinancialStats(userId);
+  const financialStats = await getFinancialStats(viewContext);
+
+  // Build queries with simple belong_id ownership filter
+  const assetsQuery = applyOwnershipFilter(
+    supabaseAdmin.from('assets').select('*'),
+    viewContext
+  );
+
+  const debtsQuery = applyOwnershipFilter(
+    supabaseAdmin.from('debts').select('*'),
+    viewContext
+  ).gt('current_balance', 0);
 
   // Fetch assets and debts for agent (need detailed breakdown)
   const [assetsResult, debtsResult] = await Promise.all([
-    supabaseAdmin.from('assets').select('*').eq('user_id', userId),
-    supabaseAdmin.from('debts').select('*').eq('user_id', userId).gt('current_balance', 0),
+    assetsQuery,
+    debtsQuery,
   ]);
 
   if (assetsResult.error) throw new AppError('Failed to fetch assets', 500);

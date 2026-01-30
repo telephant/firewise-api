@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { getFinancialStats, FinancialStats, clearFinancialStatsCache } from '../utils/financial-stats';
+import { getViewContext } from '../utils/family-context';
 
 /**
  * Get Financial Stats
@@ -17,10 +18,12 @@ export const getStats = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
+
     // Check if force refresh is requested
     const forceRefresh = req.query.refresh === 'true';
 
-    const stats = await getFinancialStats(userId, forceRefresh);
+    const stats = await getFinancialStats(viewContext, forceRefresh);
 
     res.json({
       success: true,
@@ -47,7 +50,8 @@ export const clearCache = async (
       return;
     }
 
-    clearFinancialStatsCache(userId);
+    const viewContext = await getViewContext(req);
+    clearFinancialStatsCache(viewContext);
 
     res.json({
       success: true,

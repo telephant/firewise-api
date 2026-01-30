@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
+import { getViewContext, applyOwnershipFilter, buildOwnershipValues } from '../utils/family-context';
 
 interface FireLinkedLedger {
   id: string;
@@ -15,7 +16,7 @@ interface FireLinkedLedger {
   };
 }
 
-// Get all linked ledgers for the authenticated user
+// Get all linked ledgers for the authenticated user/family
 export const getFireLinkedLedgers = async (
   req: AuthenticatedRequest,
   res: Response<ApiResponse<FireLinkedLedger[]>>
@@ -27,13 +28,16 @@ export const getFireLinkedLedgers = async (
       return;
     }
 
-    const { data: linkedLedgers, error } = await supabaseAdmin
-      .from('fire_linked_ledgers')
-      .select(`
+    // Get view context for family/personal mode
+    const viewContext = await getViewContext(req);
+
+    const { data: linkedLedgers, error } = await applyOwnershipFilter(
+      supabaseAdmin.from('fire_linked_ledgers').select(`
         *,
         ledger:ledgers(id, name, description)
-      `)
-      .eq('user_id', userId);
+      `),
+      viewContext
+    );
 
     if (error) {
       console.error('Error fetching fire linked ledgers:', error);
@@ -48,7 +52,7 @@ export const getFireLinkedLedgers = async (
   }
 };
 
-// Set linked ledgers (replaces all existing links)
+// Set linked ledgers (replaces all existing links for user/family)
 export const setFireLinkedLedgers = async (
   req: AuthenticatedRequest,
   res: Response<ApiResponse<FireLinkedLedger[]>>
@@ -75,11 +79,14 @@ export const setFireLinkedLedgers = async (
       }
     }
 
-    // Delete all existing links for this user
+    // Get view context for family/personal mode
+    const viewContext = await getViewContext(req);
+
+    // Delete all existing links for this user/family (based on belong_id)
     const { error: deleteError } = await supabaseAdmin
       .from('fire_linked_ledgers')
       .delete()
-      .eq('user_id', userId);
+      .eq('belong_id', viewContext.belongId);
 
     if (deleteError) {
       console.error('Error deleting existing linked ledgers:', deleteError);
@@ -92,9 +99,10 @@ export const setFireLinkedLedgers = async (
       return;
     }
 
-    // Insert new links
+    // Insert new links with ownership values
+    const ownershipValues = buildOwnershipValues(viewContext);
     const inserts = ledger_ids.map((ledger_id: string) => ({
-      user_id: userId,
+      ...ownershipValues,
       ledger_id,
     }));
 

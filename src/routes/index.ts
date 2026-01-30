@@ -24,6 +24,7 @@ import flowFreedomRoutes from './flow-freedom.routes';
 import runwayRoutes from './runway.routes';
 import assetImportRoutes from './asset-import.routes';
 import financialStatsRoutes from './financial-stats.routes';
+import familyRoutes, { invitationRouter } from './family.routes';
 
 const router = Router();
 
@@ -59,5 +60,7 @@ router.use('/fire/flow-freedom', flowFreedomRoutes);
 router.use('/fire/runway', runwayRoutes);
 router.use('/fire/assets/import', assetImportRoutes);
 router.use('/fire/financial-stats', financialStatsRoutes);
+router.use('/fire/families', familyRoutes);
+router.use('/fire/invitations', invitationRouter);
 
 export default router;

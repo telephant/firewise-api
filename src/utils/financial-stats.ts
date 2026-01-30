@@ -7,6 +7,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { Debt } from '../types';
 import { getUserPreferences, sumWithConversion, MoneyEntry, getExchangeRates, convertAmount } from './currency-conversion';
 import { calculateDataWindow, mapToMonthlyData, DataQuality } from './data-window';
+import { ViewContext, applyOwnershipFilter } from './family-context';
 
 // Passive income categories
 const PASSIVE_INCOME_CATEGORIES = ['dividend', 'rental', 'interest'];
@@ -56,23 +57,31 @@ export interface FinancialStats {
   }>;
 }
 
-// Cache for financial stats (1 minute TTL per user)
+// Cache for financial stats (1 minute TTL per user/family)
 const statsCache = new Map<string, { data: FinancialStats; timestamp: number }>();
 const STATS_CACHE_TTL = 60 * 1000; // 1 minute
 
 /**
- * Get financial stats for a user (with caching)
+ * Build cache key based on view context
+ * Uses belongId which is already the canonical key (userId for personal, familyId for family)
  */
-export async function getFinancialStats(userId: string, forceRefresh = false): Promise<FinancialStats> {
+function buildCacheKey(viewContext: ViewContext): string {
+  return `belong:${viewContext.belongId}`
+}
+
+/**
+ * Get financial stats for a user/family (with caching)
+ */
+export async function getFinancialStats(viewContext: ViewContext, forceRefresh = false): Promise<FinancialStats> {
   // Check cache first
-  const cacheKey = userId;
+  const cacheKey = buildCacheKey(viewContext);
   const cached = statsCache.get(cacheKey);
   if (!forceRefresh && cached && Date.now() - cached.timestamp < STATS_CACHE_TTL) {
     return cached.data;
   }
 
   // Calculate fresh stats
-  const stats = await calculateFinancialStats(userId);
+  const stats = await calculateFinancialStats(viewContext);
 
   // Cache the result
   statsCache.set(cacheKey, { data: stats, timestamp: Date.now() });
@@ -81,16 +90,19 @@ export async function getFinancialStats(userId: string, forceRefresh = false): P
 }
 
 /**
- * Clear cached stats for a user (call when data changes)
+ * Clear cached stats for a user/family (call when data changes)
  */
-export function clearFinancialStatsCache(userId: string): void {
-  statsCache.delete(userId);
+export function clearFinancialStatsCache(viewContext: ViewContext): void {
+  const cacheKey = buildCacheKey(viewContext);
+  statsCache.delete(cacheKey);
 }
 
 /**
- * Calculate financial stats for a user
+ * Calculate financial stats for a user/family
  */
-async function calculateFinancialStats(userId: string): Promise<FinancialStats> {
+async function calculateFinancialStats(viewContext: ViewContext): Promise<FinancialStats> {
+  const { userId } = viewContext;
+
   // Get user preferences for currency
   const userPrefs = await getUserPreferences(userId);
   const preferredCurrency = userPrefs?.preferred_currency || 'USD';
@@ -100,25 +112,29 @@ async function calculateFinancialStats(userId: string): Promise<FinancialStats> 
   const twelveMonthsAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1);
   const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
-  // Fetch all data in parallel
+  // Build base queries with simple belong_id ownership filter
+  const flowsQuery = applyOwnershipFilter(
+    supabaseAdmin.from('flows').select('type, amount, currency, date, category, from_asset_id, needs_review'),
+    viewContext
+  )
+    .in('type', ['income', 'expense'])
+    .gte('date', formatDate(twelveMonthsAgo))
+    .neq('category', 'adjustment')
+    .eq('needs_review', false); // Only include reviewed flows
+
+  const debtsQuery = applyOwnershipFilter(
+    supabaseAdmin.from('debts').select('*'),
+    viewContext
+  ).gt('current_balance', 0);
+
+  // Fetch all data in parallel with ownership filter
   const [flowsResult, linkedLedgersResult, debtsResult] = await Promise.all([
-    supabaseAdmin
-      .from('flows')
-      .select('type, amount, currency, date, category, from_asset_id, needs_review')
-      .eq('user_id', userId)
-      .in('type', ['income', 'expense'])
-      .gte('date', formatDate(twelveMonthsAgo))
-      .neq('category', 'adjustment')
-      .eq('needs_review', false), // Only include reviewed flows
-    supabaseAdmin
-      .from('fire_linked_ledgers')
-      .select('ledger_id')
-      .eq('user_id', userId),
-    supabaseAdmin
-      .from('debts')
-      .select('*')
-      .eq('user_id', userId)
-      .gt('current_balance', 0),
+    flowsQuery,
+    applyOwnershipFilter(
+      supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
+      viewContext
+    ),
+    debtsQuery,
   ]);
 
   if (flowsResult.error) throw new Error('Failed to fetch flows');

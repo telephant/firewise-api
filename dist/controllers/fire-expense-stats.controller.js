@@ -4,6 +4,7 @@ exports.getExpenseStats = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
 const currency_conversion_1 = require("../utils/currency-conversion");
+const family_context_1 = require("../utils/family-context");
 /**
  * Get expense statistics for the FIRE dashboard
  * Optimized: Uses 2-3 parallel queries instead of many sequential ones
@@ -15,6 +16,7 @@ const getExpenseStats = async (req, res) => {
             res.status(401).json({ success: false, error: 'Unauthorized' });
             return;
         }
+        const viewContext = await (0, family_context_1.getViewContext)(req);
         // Parse optional year/month query parameters
         // month is 1-12 (January = 1), defaults to current month
         const now = new Date();
@@ -33,27 +35,23 @@ const getExpenseStats = async (req, res) => {
         const userPrefs = await (0, currency_conversion_1.getUserPreferences)(userId);
         const preferredCurrency = userPrefs?.preferred_currency || 'USD';
         const shouldConvert = userPrefs?.convert_all_to_preferred || false;
+        // Build flows query with family/personal context (using simple belong_id filter)
+        const flowsQuery = (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('flows').select(`
+        type,
+        amount,
+        currency,
+        date,
+        flow_expense_category_id,
+        flow_expense_category:flow_expense_categories(id, name, icon)
+      `), viewContext)
+            .in('type', ['expense', 'income'])
+            .gte('date', formatDate(sixMonthsAgoStart))
+            .lte('date', formatDate(currentMonthEnd));
         // Single query to get all flows for 6+ months (income + expense)
         // This is more efficient than multiple queries
         const [flowsResult, linkedLedgersResult] = await Promise.all([
-            supabase_1.supabaseAdmin
-                .from('flows')
-                .select(`
-          type,
-          amount,
-          currency,
-          date,
-          flow_expense_category_id,
-          flow_expense_category:flow_expense_categories(id, name, icon)
-        `)
-                .eq('user_id', userId)
-                .in('type', ['expense', 'income'])
-                .gte('date', formatDate(sixMonthsAgoStart))
-                .lte('date', formatDate(currentMonthEnd)),
-            supabase_1.supabaseAdmin
-                .from('fire_linked_ledgers')
-                .select('ledger_id')
-                .eq('user_id', userId),
+            flowsQuery,
+            (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'), viewContext),
         ]);
         if (flowsResult.error) {
             console.error('Error fetching flows:', flowsResult.error);

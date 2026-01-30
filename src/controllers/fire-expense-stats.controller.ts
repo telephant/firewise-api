@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
 
 // Response types for expense stats
 interface CategoryBreakdown {
@@ -51,6 +52,8 @@ export const getExpenseStats = async (
       return;
     }
 
+    const viewContext = await getViewContext(req);
+
     // Parse optional year/month query parameters
     // month is 1-12 (January = 1), defaults to current month
     const now = new Date();
@@ -73,27 +76,30 @@ export const getExpenseStats = async (
     const preferredCurrency = userPrefs?.preferred_currency || 'USD';
     const shouldConvert = userPrefs?.convert_all_to_preferred || false;
 
+    // Build flows query with family/personal context (using simple belong_id filter)
+    const flowsQuery = applyOwnershipFilter(
+      supabaseAdmin.from('flows').select(`
+        type,
+        amount,
+        currency,
+        date,
+        flow_expense_category_id,
+        flow_expense_category:flow_expense_categories(id, name, icon)
+      `),
+      viewContext
+    )
+      .in('type', ['expense', 'income'])
+      .gte('date', formatDate(sixMonthsAgoStart))
+      .lte('date', formatDate(currentMonthEnd));
+
     // Single query to get all flows for 6+ months (income + expense)
     // This is more efficient than multiple queries
     const [flowsResult, linkedLedgersResult] = await Promise.all([
-      supabaseAdmin
-        .from('flows')
-        .select(`
-          type,
-          amount,
-          currency,
-          date,
-          flow_expense_category_id,
-          flow_expense_category:flow_expense_categories(id, name, icon)
-        `)
-        .eq('user_id', userId)
-        .in('type', ['expense', 'income'])
-        .gte('date', formatDate(sixMonthsAgoStart))
-        .lte('date', formatDate(currentMonthEnd)),
-      supabaseAdmin
-        .from('fire_linked_ledgers')
-        .select('ledger_id')
-        .eq('user_id', userId),
+      flowsQuery,
+      applyOwnershipFilter(
+        supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
+        viewContext
+      ),
     ]);
 
     if (flowsResult.error) {
