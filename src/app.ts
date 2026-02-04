@@ -7,11 +7,17 @@ import { requestLogger } from './middleware/logger';
 
 const app = express();
 
-// Middleware
-app.use(helmet());
+// CORS - must be first, before helmet
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-View-Mode'],
+}));
+
+// Security headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
