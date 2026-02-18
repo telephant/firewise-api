@@ -6,22 +6,53 @@ const error_1 = require("../middleware/error");
 const currency_conversion_1 = require("../utils/currency-conversion");
 const stock_price_1 = require("../utils/stock-price");
 const family_context_1 = require("../utils/family-context");
+// Metal configuration - maps metal_type to Yahoo Finance symbol
+const METAL_CONFIG = {
+    gold: { symbol: 'GC=F', priceUnit: 'troy_oz' },
+    silver: { symbol: 'SI=F', priceUnit: 'troy_oz' },
+};
+// Conversion factors to grams
+const UNIT_TO_GRAMS = {
+    gram: 1,
+    kg: 1000,
+    oz: 28.3495, // avoirdupois ounce
+    troy_oz: 31.1035, // troy ounce (used for precious metals)
+    pound: 453.592,
+};
 /**
- * Add stock prices and converted values to stock/ETF assets
- * Balance remains as shares, but we calculate and convert market_value
+ * Convert metal price from Yahoo's unit to user's unit
+ * Yahoo returns price per troy_oz (gold/silver) or per pound (copper)
+ */
+function convertMetalPrice(yahooPrice, fromUnit, toUnit) {
+    const fromGrams = UNIT_TO_GRAMS[fromUnit] || 1;
+    const toGrams = UNIT_TO_GRAMS[toUnit] || 1;
+    // Price per gram = yahooPrice / fromGrams
+    // Price per toUnit = (yahooPrice / fromGrams) * toGrams
+    return (yahooPrice / fromGrams) * toGrams;
+}
+/**
+ * Add stock/metal prices and converted values to stock/ETF/metals assets
+ * Balance remains as shares/weight, but we calculate and convert market_value
  */
 async function addStockPricesAndConversion(assets, preferredCurrency) {
     // Find all stock/ETF assets with tickers
     const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
     const tickers = [...new Set(stockAssets.map(a => a.ticker))];
-    // Fetch all stock prices in parallel
-    const pricePromises = tickers.map(ticker => (0, stock_price_1.fetchStockPrice)(ticker));
+    // Find all metal assets and get their Yahoo symbols
+    const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
+    const metalSymbols = [...new Set(metalAssets
+            .map(a => METAL_CONFIG[a.metadata?.metal_type]?.symbol)
+            .filter((s) => !!s))];
+    // Combine all symbols to fetch
+    const allSymbols = [...tickers, ...metalSymbols];
+    // Fetch all prices in parallel
+    const pricePromises = allSymbols.map(symbol => (0, stock_price_1.fetchStockPrice)(symbol));
     const priceResults = await Promise.all(pricePromises);
     // Create price map
     const priceMap = new Map();
-    tickers.forEach((ticker, index) => {
+    allSymbols.forEach((symbol, index) => {
         if (priceResults[index]) {
-            priceMap.set(ticker, priceResults[index]);
+            priceMap.set(symbol, priceResults[index]);
         }
     });
     // Collect all currencies for exchange rate conversion
@@ -36,8 +67,9 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
     });
     // Get exchange rates
     const rateMap = await (0, currency_conversion_1.getExchangeRates)(Array.from(currencies));
-    // Add stock_price, market_value, and converted_balance to assets
+    // Add prices, market_value, and converted_balance to assets
     return assets.map(asset => {
+        // Handle stocks/ETFs
         if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
             const stockPrice = priceMap.get(asset.ticker);
             if (stockPrice) {
@@ -53,6 +85,32 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
                     converted_balance: conversion ? Math.round(conversion.converted * 100) / 100 : marketValue,
                     converted_currency: preferredCurrency,
                 };
+            }
+        }
+        // Handle metals
+        if (asset.type === 'metals' && asset.metadata?.metal_type) {
+            const metalType = asset.metadata.metal_type;
+            const metalConfig = METAL_CONFIG[metalType];
+            if (metalConfig) {
+                const metalPrice = priceMap.get(metalConfig.symbol);
+                if (metalPrice) {
+                    // Get the user's unit (e.g., gram, kg, oz)
+                    const userUnit = asset.metadata.metal_unit || 'gram';
+                    // Convert Yahoo price (per troy_oz or pound) to user's unit
+                    const pricePerUserUnit = convertMetalPrice(metalPrice.price, metalConfig.priceUnit, userUnit);
+                    // Calculate market value: weight * price_per_unit (in USD)
+                    const marketValue = asset.balance * pricePerUserUnit;
+                    // Convert to user's preferred currency
+                    const conversion = (0, currency_conversion_1.convertAmount)(marketValue, metalPrice.currency, preferredCurrency, rateMap);
+                    return {
+                        ...asset,
+                        stock_price: pricePerUserUnit, // Price per user's unit
+                        stock_currency: metalPrice.currency,
+                        market_value: marketValue,
+                        converted_balance: conversion ? Math.round(conversion.converted * 100) / 100 : marketValue,
+                        converted_currency: preferredCurrency,
+                    };
+                }
             }
         }
         return asset;
@@ -94,11 +152,12 @@ const getAssets = async (req, res) => {
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Add stock prices and convert to preferred currency for stock/ETF assets
         const assetsWithStockPrices = await addStockPricesAndConversion(assets || [], preferredCurrency);
-        // Add currency conversion fields for non-stock assets
-        // Stock assets already have converted_balance from addStockPricesAndConversion
+        // Add currency conversion fields for non-stock/non-metal assets
+        // Stock/ETF/Metal assets already have converted_balance from addStockPricesAndConversion
         const assetsWithConversion = await (0, currency_conversion_1.addConvertedFieldsToArray)(assetsWithStockPrices.map(a => {
-            // For stock/ETF: skip balance conversion (already handled above)
-            if ((a.type === 'stock' || a.type === 'etf') && a.stock_price) {
+            // For stock/ETF/metals: skip balance conversion (already handled above)
+            if (((a.type === 'stock' || a.type === 'etf') && a.stock_price) ||
+                (a.type === 'metals' && a.converted_balance !== undefined)) {
                 return { ...a, skip_balance_conversion: true };
             }
             return a;
@@ -179,10 +238,11 @@ const getAsset = async (req, res) => {
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Add stock price and convert to preferred currency for stock/ETF assets
         const [assetWithStockPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
-        // Add currency conversion fields (skip for stocks - already handled above)
+        // Add currency conversion fields (skip for stocks/metals - already handled above)
         const assetWithConversion = await (0, currency_conversion_1.addConvertedFieldsToSingle)({
             ...assetWithStockPrice,
-            skip_balance_conversion: (asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price ? true : undefined,
+            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price) ||
+                (asset.type === 'metals' && assetWithStockPrice.converted_balance !== undefined)) ? true : undefined,
         }, userId);
         res.json({
             success: true,
@@ -213,7 +273,7 @@ const createAsset = async (req, res) => {
             res.status(400).json({ success: false, error: 'Asset type is required' });
             return;
         }
-        const validTypes = ['cash', 'deposit', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'other'];
+        const validTypes = ['cash', 'deposit', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'metals', 'other'];
         if (!validTypes.includes(type)) {
             res.status(400).json({ success: false, error: 'Invalid asset type' });
             return;
@@ -268,6 +328,7 @@ const createAsset = async (req, res) => {
 exports.createAsset = createAsset;
 /**
  * Update an existing asset
+ * If balance changes, creates an adjustment transaction atomically
  */
 const updateAsset = async (req, res) => {
     try {
@@ -275,8 +336,8 @@ const updateAsset = async (req, res) => {
         const viewContext = await (0, family_context_1.getViewContext)(req);
         const { id } = req.params;
         const { name, type, ticker, currency, market, metadata, balance } = req.body;
-        // Check if asset exists and belongs to user/family
-        let checkQuery = supabase_1.supabaseAdmin.from('assets').select('id');
+        // Fetch existing asset with current balance
+        let checkQuery = supabase_1.supabaseAdmin.from('assets').select('*');
         checkQuery = (0, family_context_1.applyOwnershipFilterWithId)(checkQuery, id, viewContext);
         const { data: existingAsset, error: fetchError } = await checkQuery.single();
         if (fetchError || !existingAsset) {
@@ -296,6 +357,7 @@ const updateAsset = async (req, res) => {
             updates.market = market || null;
         if (metadata !== undefined)
             updates.metadata = metadata;
+        // Update balance if provided
         if (balance !== undefined) {
             updates.balance = parseFloat(balance);
             updates.balance_updated_at = new Date().toISOString();
@@ -313,7 +375,18 @@ const updateAsset = async (req, res) => {
             }
             throw new error_1.AppError('Failed to update asset', 500);
         }
-        res.json({ success: true, data: asset });
+        // Get user preferences for currency
+        const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = prefs?.preferred_currency || 'USD';
+        // Add stock/metal price and convert to preferred currency
+        const [assetWithPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
+        // Add currency conversion fields (skip for stocks/metals - already handled above)
+        const assetWithConversion = await (0, currency_conversion_1.addConvertedFieldsToSingle)({
+            ...assetWithPrice,
+            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf') && assetWithPrice.stock_price) ||
+                (asset.type === 'metals' && assetWithPrice.converted_balance !== undefined)) ? true : undefined,
+        }, userId);
+        res.json({ success: true, data: assetWithConversion });
     }
     catch (err) {
         if (err instanceof error_1.AppError)
@@ -365,7 +438,8 @@ const getNetWorthStats = async (req, res) => {
         const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Build queries with family/personal context
-        let assetsQuery = supabase_1.supabaseAdmin.from('assets').select('id, type, ticker, balance, currency');
+        // Include metadata for metals (needed for metal_type and metal_unit)
+        let assetsQuery = supabase_1.supabaseAdmin.from('assets').select('id, type, ticker, balance, currency, metadata');
         assetsQuery = (0, family_context_1.applyOwnershipFilter)(assetsQuery, viewContext);
         let debtsQuery = supabase_1.supabaseAdmin.from('debts').select('id, current_balance, currency, status').eq('status', 'active');
         debtsQuery = (0, family_context_1.applyOwnershipFilter)(debtsQuery, viewContext);
@@ -385,12 +459,19 @@ const getNetWorthStats = async (req, res) => {
         // Find stock/ETF assets and fetch prices
         const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
         const tickers = [...new Set(stockAssets.map(a => a.ticker))];
-        const pricePromises = tickers.map(ticker => (0, stock_price_1.fetchStockPrice)(ticker));
+        // Find metal assets and get their Yahoo symbols
+        const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
+        const metalSymbols = [...new Set(metalAssets
+                .map(a => METAL_CONFIG[a.metadata?.metal_type]?.symbol)
+                .filter((s) => !!s))];
+        // Fetch all prices (stocks + metals)
+        const allSymbols = [...tickers, ...metalSymbols];
+        const pricePromises = allSymbols.map(symbol => (0, stock_price_1.fetchStockPrice)(symbol));
         const priceResults = await Promise.all(pricePromises);
         const priceMap = new Map();
-        tickers.forEach((ticker, index) => {
+        allSymbols.forEach((symbol, index) => {
             if (priceResults[index]) {
-                priceMap.set(ticker, priceResults[index]);
+                priceMap.set(symbol, priceResults[index]);
             }
         });
         // Collect all currencies for exchange rates
@@ -415,6 +496,26 @@ const getNetWorthStats = async (req, res) => {
                 }
                 else {
                     continue; // Skip if no price available
+                }
+            }
+            else if (asset.type === 'metals' && asset.metadata?.metal_type) {
+                // Handle metals
+                const metalType = asset.metadata.metal_type;
+                const metalConfig = METAL_CONFIG[metalType];
+                if (metalConfig) {
+                    const metalPrice = priceMap.get(metalConfig.symbol);
+                    if (metalPrice) {
+                        const userUnit = asset.metadata.metal_unit || 'gram';
+                        const pricePerUserUnit = convertMetalPrice(metalPrice.price, metalConfig.priceUnit, userUnit);
+                        value = asset.balance * pricePerUserUnit;
+                        valueCurrency = metalPrice.currency;
+                    }
+                    else {
+                        continue; // Skip if no price available
+                    }
+                }
+                else {
+                    continue;
                 }
             }
             else {

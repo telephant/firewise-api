@@ -67,6 +67,9 @@ const chat_routes_1 = __importDefault(require("./chat.routes"));
 const income_routes_1 = __importDefault(require("./income.routes"));
 const fire_expense_routes_1 = __importDefault(require("./fire-expense.routes"));
 const dividend_calendar_routes_1 = __importDefault(require("./dividend-calendar.routes"));
+const passive_income_routes_1 = __importDefault(require("./passive-income.routes"));
+const monthly_summary_routes_1 = __importDefault(require("./monthly-summary.routes"));
+const monthly_snapshot_routes_1 = __importDefault(require("./monthly-snapshot.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
@@ -85,7 +88,7 @@ router.use('/fire/transactions', transaction_log_routes_1.default);
 router.use('/fire/expense-categories', expense_category_routes_1.default);
 router.use('/fire/linked-ledgers', fire_linked_ledger_routes_1.default);
 router.use('/fire/expense-stats', fire_expense_stats_routes_1.default);
-router.use('/fire/stock-symbols', stock_symbol_routes_1.default);
+router.use('/fire/symbols', stock_symbol_routes_1.default);
 router.use('/fire/stock-prices', stock_price_routes_1.default);
 router.use('/fire/feedback', feedback_routes_1.default);
 router.use('/fire/tax-settings', user_tax_settings_routes_1.default);
@@ -104,5 +107,8 @@ router.use('/fire/chat', chat_routes_1.default);
 router.use('/fire/income', income_routes_1.default);
 router.use('/fire/expense', fire_expense_routes_1.default);
 router.use('/fire/dividend-calendar', dividend_calendar_routes_1.default);
+router.use('/fire/passive-income', passive_income_routes_1.default);
+router.use('/fire/monthly-summary', monthly_summary_routes_1.default);
+router.use('/fire/snapshots', monthly_snapshot_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map

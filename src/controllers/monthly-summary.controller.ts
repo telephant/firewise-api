@@ -127,7 +127,7 @@ export const getMonthlySummary = async (
     });
 
     // Fetch expenses from linked ledgers (from expenses table, not transactions)
-    let linkedLedgerExpenses: { ledger_id: string; amount: number; currency_id: string; ledger_currencies: { code: string } | null }[] = [];
+    let linkedLedgerExpenses: { ledger_id: string; amount: number; currency_id: string; ledger_currencies: { code: string } | { code: string }[] | null }[] = [];
     if (linkedLedgerIds.length > 0) {
       const { data: expenses } = await supabaseAdmin
         .from('expenses')
@@ -151,7 +151,8 @@ export const getMonthlySummary = async (
     });
     // Also include currencies from linked ledger expenses
     linkedLedgerExpenses.forEach((exp) => {
-      const currency = exp.ledger_currencies as unknown as { code: string } | null;
+      const lc = exp.ledger_currencies;
+      const currency = Array.isArray(lc) ? lc[0] : lc;
       if (currency?.code) {
         currencies.add(currency.code.toLowerCase());
       }
@@ -221,7 +222,8 @@ export const getMonthlySummary = async (
 
     // Process linked ledger expenses (from expenses table)
     linkedLedgerExpenses.forEach((exp) => {
-      const currency = exp.ledger_currencies as unknown as { code: string } | null;
+      const lc = exp.ledger_currencies;
+      const currency = Array.isArray(lc) ? lc[0] : lc;
       const expCurrency = currency?.code || 'USD';
       const amount = convertToPreferred(exp.amount, expCurrency);
       const ledgerId = exp.ledger_id;

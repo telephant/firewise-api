@@ -463,6 +463,7 @@ interface DebtTransactionResult {
   debt: Debt;
   from_asset?: Asset;
   to_asset?: Asset;
+  schedule_id?: string;
 }
 
 export const createDebtTransaction = async (
