@@ -165,9 +165,14 @@ export const createFamily = async (
     clearFamilyCache(userId);
 
     // Migrate data if requested
+    let cashBalancesByCurrency: Record<string, number> | undefined;
     if (migrate_data) {
-      await migrateUserDataToFamily(userId, family.id);
+      const migrationResult = await migrateUserDataToFamily(userId, family.id);
+      cashBalancesByCurrency = migrationResult.cashBalancesByCurrency;
     }
+
+    // Create family cash account(s) with migrated balances
+    await ensureFamilyCashAccount(family.id, userId, cashBalancesByCurrency);
 
     res.status(201).json({ success: true, data: family });
   } catch (err) {
@@ -905,7 +910,9 @@ export const acceptInvitation = async (
 
     // Migrate data if requested
     if (migrate_data) {
-      await migrateUserDataToFamily(userId, invitation.family_id);
+      const migrationResult = await migrateUserDataToFamily(userId, invitation.family_id);
+      // Create/update family cash account(s) with migrated balances
+      await ensureFamilyCashAccount(invitation.family_id, userId, migrationResult.cashBalancesByCurrency);
     }
 
     // Get family for response
@@ -949,6 +956,9 @@ export const migrateDataToFamily = async (
 
     const migrated = await migrateUserDataToFamily(userId, id);
 
+    // Create/update family cash account(s) with migrated balances
+    await ensureFamilyCashAccount(id, userId, migrated.cashBalancesByCurrency);
+
     res.json({ success: true, data: { migrated } });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -963,33 +973,93 @@ export const migrateDataToFamily = async (
  * Migrating to family changes belong_id from user_id to family_id
  * user_id (creator) remains unchanged
  */
+interface MigrationResult {
+  assets: number;
+  flows: number;
+  debts: number;
+  schedules: number;
+  categories: number;
+  linkedLedgers: number;
+  cashBalancesByCurrency: Record<string, number>;
+}
+
 async function migrateUserDataToFamily(
   userId: string,
   familyId: string
-): Promise<{ assets: number; flows: number; debts: number; schedules: number; categories: number; linkedLedgers: number }> {
-  const results = { assets: 0, flows: 0, debts: 0, schedules: 0, categories: 0, linkedLedgers: 0 };
+): Promise<MigrationResult> {
+  const results: MigrationResult = {
+    assets: 0,
+    flows: 0,
+    debts: 0,
+    schedules: 0,
+    categories: 0,
+    linkedLedgers: 0,
+    cashBalancesByCurrency: {},
+  };
 
   // Migrate personal data to family by updating belong_id
   // Personal data: belong_id = user_id
   // Family data: belong_id = family_id (user_id stays as creator)
 
-  // Migrate assets - change belong_id from user_id to family_id
+  // Special handling for cash accounts:
+  // 1. Keep them as personal (don't migrate belong_id)
+  // 2. Set their balance to 0
+  // 3. Transfer the total balance to family cash account
+
+  // First, get all personal cash accounts and their balances
+  const { data: cashAccounts, error: cashError } = await supabaseAdmin
+    .from('assets')
+    .select('id, balance, currency')
+    .eq('belong_id', userId)
+    .eq('type', 'cash');
+
+  if (cashError) {
+    console.error('[Family] Error fetching cash accounts:', cashError);
+  }
+
+  // Calculate total balance from cash accounts (group by currency)
+  const cashBalancesByCurrency: Record<string, number> = {};
+  if (cashAccounts && cashAccounts.length > 0) {
+    for (const account of cashAccounts) {
+      const currency = account.currency || 'USD';
+      cashBalancesByCurrency[currency] = (cashBalancesByCurrency[currency] || 0) + (account.balance || 0);
+    }
+
+    // Zero out personal cash account balances (keep them personal)
+    const { error: zeroError } = await supabaseAdmin
+      .from('assets')
+      .update({ balance: 0 })
+      .eq('belong_id', userId)
+      .eq('type', 'cash');
+
+    if (zeroError) {
+      console.error('[Family] Error zeroing cash accounts:', zeroError);
+    } else {
+      console.log(`[Family] Zeroed ${cashAccounts.length} personal cash accounts`);
+    }
+  }
+
+  // Store cash balances for later use in ensureFamilyCashAccount
+  results.cashBalancesByCurrency = cashBalancesByCurrency;
+
+  // Migrate NON-cash assets to family
   const { data: assetsData, error: assetsError } = await supabaseAdmin
     .from('assets')
     .update({ belong_id: familyId })
     .eq('belong_id', userId)
+    .neq('type', 'cash')  // Exclude cash accounts
     .select('id');
   if (assetsError) console.error('[Family] Assets migration error:', assetsError);
   results.assets = assetsData?.length || 0;
 
-  // Migrate flows
-  const { data: flowsData, error: flowsError } = await supabaseAdmin
-    .from('flows')
+  // Migrate transactions
+  const { data: transactionsData, error: transactionsError } = await supabaseAdmin
+    .from('transactions')
     .update({ belong_id: familyId })
     .eq('belong_id', userId)
     .select('id');
-  if (flowsError) console.error('[Family] Flows migration error:', flowsError);
-  results.flows = flowsData?.length || 0;
+  if (transactionsError) console.error('[Family] Transactions migration error:', transactionsError);
+  results.flows = transactionsData?.length || 0;
 
   // Migrate debts
   const { data: debtsData, error: debtsError } = await supabaseAdmin
@@ -1029,4 +1099,93 @@ async function migrateUserDataToFamily(
 
   console.log(`[Family] Migrated data for user ${userId} to family ${familyId}:`, results);
   return results;
+}
+
+/**
+ * Helper: Ensure family has at least one cash account
+ * Creates cash accounts with migrated balances from personal accounts
+ * @param cashBalancesByCurrency - Optional map of currency to balance from migrated personal accounts
+ */
+async function ensureFamilyCashAccount(
+  familyId: string,
+  creatorUserId: string,
+  cashBalancesByCurrency?: Record<string, number>
+): Promise<void> {
+  // Check if family already has any cash accounts
+  const { data: existingCash, error: checkError } = await supabaseAdmin
+    .from('assets')
+    .select('id, currency, balance')
+    .eq('belong_id', familyId)
+    .eq('type', 'cash');
+
+  if (checkError) {
+    console.error('[Family] Error checking for cash accounts:', checkError);
+    return;
+  }
+
+  // If we have balances to migrate
+  if (cashBalancesByCurrency && Object.keys(cashBalancesByCurrency).length > 0) {
+    for (const [currency, balance] of Object.entries(cashBalancesByCurrency)) {
+      if (balance <= 0) continue;
+
+      // Check if family already has a cash account in this currency
+      const existingForCurrency = existingCash?.find(a => a.currency === currency);
+
+      if (existingForCurrency) {
+        // Add balance to existing account
+        const { error: updateError } = await supabaseAdmin
+          .from('assets')
+          .update({ balance: (existingForCurrency.balance || 0) + balance })
+          .eq('id', existingForCurrency.id);
+
+        if (updateError) {
+          console.error(`[Family] Error updating ${currency} cash account:`, updateError);
+        } else {
+          console.log(`[Family] Added ${balance} ${currency} to existing family cash account`);
+        }
+      } else {
+        // Create new cash account for this currency
+        const { error: createError } = await supabaseAdmin
+          .from('assets')
+          .insert({
+            user_id: creatorUserId,
+            belong_id: familyId,
+            name: currency === 'USD' ? 'Primary Account' : `${currency} Account`,
+            type: 'cash',
+            currency,
+            balance,
+          });
+
+        if (createError) {
+          console.error(`[Family] Error creating ${currency} cash account:`, createError);
+        } else {
+          console.log(`[Family] Created family ${currency} cash account with balance ${balance}`);
+        }
+      }
+    }
+    return;
+  }
+
+  // No balances to migrate - just ensure at least one cash account exists
+  if (existingCash && existingCash.length > 0) {
+    return;
+  }
+
+  // Create a default family cash account with 0 balance
+  const { error: createError } = await supabaseAdmin
+    .from('assets')
+    .insert({
+      user_id: creatorUserId,
+      belong_id: familyId,
+      name: 'Primary Account',
+      type: 'cash',
+      currency: 'USD',
+      balance: 0,
+    });
+
+  if (createError) {
+    console.error('[Family] Error creating default cash account:', createError);
+  } else {
+    console.log(`[Family] Created default cash account for family ${familyId}`);
+  }
 }

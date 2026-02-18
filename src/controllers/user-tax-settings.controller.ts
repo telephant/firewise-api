@@ -8,6 +8,8 @@ export interface UserTaxSettings {
   user_id: string;
   us_dividend_withholding_rate: number;
   us_capital_gains_rate: number;
+  sg_dividend_withholding_rate: number;
+  sg_capital_gains_rate: number;
   created_at: string;
   updated_at: string;
 }
@@ -50,6 +52,8 @@ export const getUserTaxSettings = async (
         user_id: userId,
         us_dividend_withholding_rate: 0.30, // 30% default
         us_capital_gains_rate: 0.00, // 0% default
+        sg_dividend_withholding_rate: 0.00, // 0% default (Singapore has no dividend withholding tax)
+        sg_capital_gains_rate: 0.00, // 0% default (Singapore has no capital gains tax)
       })
       .select()
       .single();
@@ -79,41 +83,59 @@ export const updateUserTaxSettings = async (
       return;
     }
 
-    const { us_dividend_withholding_rate, us_capital_gains_rate } = req.body;
+    const {
+      us_dividend_withholding_rate,
+      us_capital_gains_rate,
+      sg_dividend_withholding_rate,
+      sg_capital_gains_rate,
+    } = req.body;
 
-    // Validate rates are numbers between 0 and 1
-    if (us_dividend_withholding_rate !== undefined) {
-      const rate = Number(us_dividend_withholding_rate);
-      if (isNaN(rate) || rate < 0 || rate > 1) {
+    // Helper to validate rate
+    const validateRate = (rate: unknown, fieldName: string): number | null => {
+      if (rate === undefined) return null;
+      const numRate = Number(rate);
+      if (isNaN(numRate) || numRate < 0 || numRate > 1) {
         res.status(400).json({
           success: false,
-          error: 'us_dividend_withholding_rate must be between 0 and 1',
+          error: `${fieldName} must be between 0 and 1`,
         });
-        return;
+        return null;
       }
+      return numRate;
+    };
+
+    // Validate all rates
+    const rates: Record<string, number | undefined> = {};
+
+    if (us_dividend_withholding_rate !== undefined) {
+      const validated = validateRate(us_dividend_withholding_rate, 'us_dividend_withholding_rate');
+      if (validated === null) return;
+      rates.us_dividend_withholding_rate = validated;
     }
 
     if (us_capital_gains_rate !== undefined) {
-      const rate = Number(us_capital_gains_rate);
-      if (isNaN(rate) || rate < 0 || rate > 1) {
-        res.status(400).json({
-          success: false,
-          error: 'us_capital_gains_rate must be between 0 and 1',
-        });
-        return;
-      }
+      const validated = validateRate(us_capital_gains_rate, 'us_capital_gains_rate');
+      if (validated === null) return;
+      rates.us_capital_gains_rate = validated;
+    }
+
+    if (sg_dividend_withholding_rate !== undefined) {
+      const validated = validateRate(sg_dividend_withholding_rate, 'sg_dividend_withholding_rate');
+      if (validated === null) return;
+      rates.sg_dividend_withholding_rate = validated;
+    }
+
+    if (sg_capital_gains_rate !== undefined) {
+      const validated = validateRate(sg_capital_gains_rate, 'sg_capital_gains_rate');
+      if (validated === null) return;
+      rates.sg_capital_gains_rate = validated;
     }
 
     // Build update object with only provided fields
     const updateData: Record<string, number | string> = {
       updated_at: new Date().toISOString(),
+      ...rates,
     };
-    if (us_dividend_withholding_rate !== undefined) {
-      updateData.us_dividend_withholding_rate = Number(us_dividend_withholding_rate);
-    }
-    if (us_capital_gains_rate !== undefined) {
-      updateData.us_capital_gains_rate = Number(us_capital_gains_rate);
-    }
 
     // Try to update existing settings
     const { data: updatedSettings, error: updateError } = await supabaseAdmin
@@ -129,14 +151,10 @@ export const updateUserTaxSettings = async (
         .from('user_tax_settings')
         .insert({
           user_id: userId,
-          us_dividend_withholding_rate:
-            us_dividend_withholding_rate !== undefined
-              ? Number(us_dividend_withholding_rate)
-              : 0.30,
-          us_capital_gains_rate:
-            us_capital_gains_rate !== undefined
-              ? Number(us_capital_gains_rate)
-              : 0.00,
+          us_dividend_withholding_rate: rates.us_dividend_withholding_rate ?? 0.30,
+          us_capital_gains_rate: rates.us_capital_gains_rate ?? 0.00,
+          sg_dividend_withholding_rate: rates.sg_dividend_withholding_rate ?? 0.00,
+          sg_capital_gains_rate: rates.sg_capital_gains_rate ?? 0.00,
         })
         .select()
         .single();

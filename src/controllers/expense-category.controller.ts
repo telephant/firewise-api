@@ -1,13 +1,13 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
-import { AuthenticatedRequest, ApiResponse, FlowExpenseCategory } from '../types';
+import { AuthenticatedRequest, ApiResponse, ExpenseCategory } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
 // Get all expense categories for the authenticated user/family
-export const getFlowExpenseCategories = async (
+export const getExpenseCategories = async (
   req: AuthenticatedRequest,
-  res: Response<ApiResponse<FlowExpenseCategory[]>>
+  res: Response<ApiResponse<ExpenseCategory[]>>
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
@@ -30,7 +30,7 @@ export const getFlowExpenseCategories = async (
     const { data: categories, error } = await query;
 
     if (error) {
-      console.error('Error fetching flow expense categories:', error);
+      console.error('Error fetching expense categories:', error);
       throw new AppError('Failed to fetch expense categories', 500);
     }
 
@@ -66,15 +66,15 @@ export const getFlowExpenseCategories = async (
     res.json({ success: true, data: categories || [] });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error('Error in getFlowExpenseCategories:', err);
+    console.error('Error in getExpenseCategories:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch expense categories' });
   }
 };
 
 // Create a new expense category
-export const createFlowExpenseCategory = async (
+export const createExpenseCategory = async (
   req: AuthenticatedRequest,
-  res: Response<ApiResponse<FlowExpenseCategory>>
+  res: Response<ApiResponse<ExpenseCategory>>
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
@@ -130,22 +130,22 @@ export const createFlowExpenseCategory = async (
       .single();
 
     if (error || !category) {
-      console.error('Error creating flow expense category:', error);
+      console.error('Error creating expense category:', error);
       throw new AppError('Failed to create expense category', 500);
     }
 
     res.status(201).json({ success: true, data: category });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error('Error in createFlowExpenseCategory:', err);
+    console.error('Error in createExpenseCategory:', err);
     res.status(500).json({ success: false, error: 'Failed to create expense category' });
   }
 };
 
 // Update an expense category
-export const updateFlowExpenseCategory = async (
+export const updateExpenseCategory = async (
   req: AuthenticatedRequest,
-  res: Response<ApiResponse<FlowExpenseCategory>>
+  res: Response<ApiResponse<ExpenseCategory>>
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
@@ -185,7 +185,7 @@ export const updateFlowExpenseCategory = async (
       }
     }
 
-    const updates: Partial<FlowExpenseCategory> = {};
+    const updates: Partial<ExpenseCategory> = {};
     if (name !== undefined) updates.name = name.trim();
     if (icon !== undefined) updates.icon = icon;
     if (color !== undefined) updates.color = color;
@@ -199,20 +199,20 @@ export const updateFlowExpenseCategory = async (
       .single();
 
     if (error || !category) {
-      console.error('Error updating flow expense category:', error);
+      console.error('Error updating expense category:', error);
       throw new AppError('Failed to update expense category', 500);
     }
 
     res.json({ success: true, data: category });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error('Error in updateFlowExpenseCategory:', err);
+    console.error('Error in updateExpenseCategory:', err);
     res.status(500).json({ success: false, error: 'Failed to update expense category' });
   }
 };
 
 // Delete an expense category
-export const deleteFlowExpenseCategory = async (
+export const deleteExpenseCategory = async (
   req: AuthenticatedRequest,
   res: Response<ApiResponse>
 ): Promise<void> => {
@@ -237,11 +237,11 @@ export const deleteFlowExpenseCategory = async (
       return;
     }
 
-    // Set flow_expense_category_id to null for all flows using this category
+    // Set expense_category_id to null for all transactions using this category
     await supabaseAdmin
-      .from('flows')
-      .update({ flow_expense_category_id: null })
-      .eq('flow_expense_category_id', id);
+      .from('transactions')
+      .update({ expense_category_id: null })
+      .eq('expense_category_id', id);
 
     const { error } = await supabaseAdmin
       .from('flow_expense_categories')
@@ -249,14 +249,14 @@ export const deleteFlowExpenseCategory = async (
       .eq('id', id);
 
     if (error) {
-      console.error('Error deleting flow expense category:', error);
+      console.error('Error deleting expense category:', error);
       throw new AppError('Failed to delete expense category', 500);
     }
 
     res.json({ success: true, message: 'Category deleted successfully' });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error('Error in deleteFlowExpenseCategory:', err);
+    console.error('Error in deleteExpenseCategory:', err);
     res.status(500).json({ success: false, error: 'Failed to delete expense category' });
   }
 };

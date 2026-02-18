@@ -10,14 +10,19 @@ const routes_1 = __importDefault(require("./routes"));
 const error_1 = require("./middleware/error");
 const logger_1 = require("./middleware/logger");
 const app = (0, express_1.default)();
-// Middleware
-app.use((0, helmet_1.default)());
+// CORS - must be first, before helmet
 app.use((0, cors_1.default)({
     origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-View-Mode'],
 }));
-app.use(express_1.default.json());
-app.use(express_1.default.urlencoded({ extended: true }));
+// Security headers
+app.use((0, helmet_1.default)({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+app.use(express_1.default.json({ limit: '15mb' }));
+app.use(express_1.default.urlencoded({ extended: true, limit: '15mb' }));
 // Request/Response logging middleware
 app.use(logger_1.requestLogger);
 // Health check

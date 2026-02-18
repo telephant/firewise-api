@@ -134,7 +134,7 @@ export interface MonthlyStatsResponse {
 }
 
 // Asset types (debt is now in separate debts table)
-export type AssetType = 'cash' | 'deposit' | 'stock' | 'etf' | 'bond' | 'real_estate' | 'crypto' | 'other';
+export type AssetType = 'cash' | 'deposit' | 'stock' | 'etf' | 'bond' | 'real_estate' | 'crypto' | 'metals' | 'other';
 
 export interface Asset {
   id: string;
@@ -155,51 +155,75 @@ export interface Asset {
 // Alias for backward compatibility - Asset now includes balance directly
 export type AssetWithBalance = Asset;
 
-// Flow types (Unified Flow Model)
-// Income:   [External] → [Your Asset]
-// Expense:  [Your Asset] → [External]
-// Transfer: [Your Asset] → [Your Asset]
-// Other:    Balance corrections, misc adjustments
-export type FlowType = 'income' | 'expense' | 'transfer' | 'other';
+// =====================================================
+// Transaction Types (New Atomic Design)
+// =====================================================
+// - income: Money added to asset (salary, dividend, interest)
+// - expense: Money removed from asset (groceries, bills)
+// - buy: Investment shares added
+// - sell: Investment shares removed
+// - debt_payment: Debt payment
+// - loan: Loan disbursement (money received from a loan)
+export type TransactionType = 'income' | 'expense' | 'buy' | 'sell' | 'debt_payment' | 'loan';
 
-export interface Flow {
+export interface Transaction {
   id: string;
-  user_id: string;
-  type: FlowType;
-  amount: number; // For dividends, this is NET amount (after tax). Tax info in metadata.
-  currency: string;
-  from_asset_id: string | null;
-  to_asset_id: string | null;
-  debt_id: string | null; // Reference to debt for debt payments
+  belong_id: string;
+  type: TransactionType;
   category: string | null;
+  amount: number;
+  currency: string;
   date: string;
+
+  // Asset references
+  asset_id: string | null;         // PRIMARY: The asset affected
+  source_asset_id: string | null;  // OPTIONAL: Source/context (dividend source, cash for buy, etc.)
+  debt_id: string | null;          // For debt_payment type
+
+  // Investment specific
+  shares: number | null;
+  price_per_share: number | null;
+
+  // Metadata
   description: string | null;
-  flow_expense_category_id: string | null;
-  schedule_id: string | null; // Reference to recurring schedule that generated this flow
+  expense_category_id: string | null;
+  schedule_id: string | null;
   metadata: Record<string, unknown> | null;
   needs_review: boolean;
+
   created_at: string;
   updated_at: string;
 }
 
-export interface FlowWithDetails extends Flow {
+export interface TransactionWithDetails extends Transaction {
+  asset?: Asset | null;
+  source_asset?: Asset | null;
+  debt?: Debt | null;
+  expense_category?: ExpenseCategory | null;
+  // Backward compatible fields for frontend
   from_asset?: Asset | null;
   to_asset?: Asset | null;
-  flow_expense_category?: FlowExpenseCategory | null;
+  from_asset_id?: string | null;
+  to_asset_id?: string | null;
+  user_id?: string;  // Alias for belong_id
+  transaction_type?: TransactionType;  // Original transaction type before mapping
 }
 
-export interface FlowFilters extends PaginationParams {
-  type?: FlowType;
+export interface TransactionFilters extends PaginationParams {
+  type?: TransactionType;
+  category?: string;
   start_date?: string;
   end_date?: string;
   asset_id?: string;
+  source_asset_id?: string;
+  debt_id?: string;
   needs_review?: boolean;
 }
 
-export interface FlowStatsResponse {
+export interface TransactionStats {
   total_income: number;
   total_expense: number;
-  total_transfer: number;
+  total_investment: number;
   net_flow: number;
   currency: string;
   start_date: string;
@@ -210,8 +234,8 @@ export interface AssetFilters extends PaginationParams {
   type?: AssetType;
 }
 
-// Flow Expense Category (FIRE-specific, separate from ledger categories)
-export interface FlowExpenseCategory {
+// Expense Category (FIRE-specific, separate from ledger categories)
+export interface ExpenseCategory {
   id: string;
   user_id: string;
   name: string;
@@ -265,8 +289,8 @@ export interface UserPreferences {
 // Recurring Schedule types
 export type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
 
-export interface FlowTemplate {
-  type: FlowType;
+export interface TransactionTemplate {
+  type: TransactionType;
   amount: number;
   currency: string;
   from_asset_id: string | null;
@@ -274,19 +298,19 @@ export interface FlowTemplate {
   debt_id: string | null;
   category: string | null;
   description: string | null;
-  flow_expense_category_id: string | null;
+  expense_category_id: string | null;
   metadata: Record<string, unknown> | null;
 }
 
 export interface RecurringSchedule {
   id: string;
   user_id: string;
-  source_flow_id: string | null;
+  source_transaction_id: string | null;
   frequency: ScheduleFrequency;
   next_run_date: string;
   last_run_date: string | null;
   is_active: boolean;
-  flow_template: FlowTemplate;
+  transaction_template: TransactionTemplate;
   created_at: string;
   updated_at: string;
 }
@@ -298,7 +322,7 @@ export interface RecurringScheduleFilters extends PaginationParams {
 
 export interface ProcessRecurringResult {
   processed: number;
-  created_flows: string[];
+  created_transactions: string[];
   errors: { schedule_id: string; error: string }[];
 }
 

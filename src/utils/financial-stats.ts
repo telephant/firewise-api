@@ -113,14 +113,14 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
   const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
   // Build base queries with simple belong_id ownership filter
-  const flowsQuery = applyOwnershipFilter(
-    supabaseAdmin.from('flows').select('type, amount, currency, date, category, from_asset_id, needs_review'),
+  const transactionsQuery = applyOwnershipFilter(
+    supabaseAdmin.from('transactions').select('type, amount, currency, date, category, source_asset_id, needs_review'),
     viewContext
   )
     .in('type', ['income', 'expense'])
     .gte('date', formatDate(twelveMonthsAgo))
     .neq('category', 'adjustment')
-    .eq('needs_review', false); // Only include reviewed flows
+    .eq('needs_review', false); // Only include reviewed transactions
 
   const debtsQuery = applyOwnershipFilter(
     supabaseAdmin.from('debts').select('*'),
@@ -128,8 +128,8 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
   ).gt('current_balance', 0);
 
   // Fetch all data in parallel with ownership filter
-  const [flowsResult, linkedLedgersResult, debtsResult] = await Promise.all([
-    flowsQuery,
+  const [transactionsResult, linkedLedgersResult, debtsResult] = await Promise.all([
+    transactionsQuery,
     applyOwnershipFilter(
       supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
       viewContext
@@ -137,9 +137,9 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
     debtsQuery,
   ]);
 
-  if (flowsResult.error) throw new Error('Failed to fetch flows');
+  if (transactionsResult.error) throw new Error('Failed to fetch transactions');
 
-  const flows = flowsResult.data || [];
+  const transactions = transactionsResult.data || [];
   const debts = (debtsResult.data || []) as Debt[];
 
   // Collect entries by category
@@ -154,18 +154,18 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
   const passiveIncomeByMonth = new Map<string, MoneyEntry[]>();
   const expensesByMonth = new Map<string, MoneyEntry[]>();
 
-  // Process flows
-  flows.forEach((flow) => {
-    const monthKey = flow.date.substring(0, 7);
+  // Process transactions
+  transactions.forEach((tx) => {
+    const monthKey = tx.date.substring(0, 7);
 
-    if (flow.type === 'income') {
-      const isPassive = flow.from_asset_id !== null ||
-        PASSIVE_INCOME_CATEGORIES.includes(flow.category || '');
+    if (tx.type === 'income') {
+      const isPassive = tx.source_asset_id !== null ||
+        PASSIVE_INCOME_CATEGORIES.includes(tx.category || '');
 
       if (isPassive) {
         const entry: MoneyEntry = {
-          amount: Number(flow.amount),
-          currency: flow.currency || 'USD',
+          amount: Number(tx.amount),
+          currency: tx.currency || 'USD',
         };
 
         passiveIncomeEntries.push(entry);
@@ -176,20 +176,20 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
         passiveIncomeByMonth.set(monthKey, monthEntries);
 
         // Categorize
-        if (flow.category === 'dividend') {
+        if (tx.category === 'dividend') {
           dividendEntries.push(entry);
-        } else if (flow.category === 'rental') {
+        } else if (tx.category === 'rental') {
           rentalEntries.push(entry);
-        } else if (flow.category === 'interest') {
+        } else if (tx.category === 'interest') {
           interestEntries.push(entry);
         } else {
           otherPassiveEntries.push(entry);
         }
       }
-    } else if (flow.type === 'expense') {
+    } else if (tx.type === 'expense') {
       const entry: MoneyEntry = {
-        amount: Number(flow.amount),
-        currency: flow.currency || 'USD',
+        amount: Number(tx.amount),
+        currency: tx.currency || 'USD',
       };
 
       expenseEntries.push(entry);

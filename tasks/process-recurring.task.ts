@@ -1,14 +1,14 @@
 /**
  * Process Recurring Task
  *
- * Processes all due recurring schedules and creates flows automatically.
+ * Processes all due recurring schedules and creates transactions automatically.
  * This task should be run daily via cron job.
  *
  * Logic:
  * 1. Find all active schedules where next_run_date <= today
  * 2. For each schedule:
- *    - Create a flow from the flow_template
- *    - Adjust asset balances based on flow type
+ *    - Create a transaction from the transaction_template
+ *    - Adjust asset balances based on transaction type
  *    - Update schedule's next_run_date and last_run_date
  *
  * Usage: npx ts-node tasks/index.ts process-recurring
@@ -19,11 +19,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-type FlowType = 'income' | 'expense' | 'transfer' | 'other';
+type TransactionType = 'income' | 'expense' | 'buy' | 'sell' | 'debt_payment' | 'loan';
 type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
 
-interface FlowTemplate {
-  type: FlowType;
+interface TransactionTemplate {
+  type: TransactionType;
   amount: number;
   currency: string;
   from_asset_id: string | null;
@@ -31,29 +31,30 @@ interface FlowTemplate {
   debt_id: string | null;
   category: string | null;
   description: string | null;
-  flow_expense_category_id: string | null;
+  expense_category_id: string | null;
   metadata: Record<string, unknown> | null;
 }
 
 interface RecurringSchedule {
   id: string;
-  user_id: string;
-  source_flow_id: string | null;
+  belong_id: string;
+  source_transaction_id: string | null;
   frequency: ScheduleFrequency;
   next_run_date: string;
   last_run_date: string | null;
   is_active: boolean;
-  flow_template: FlowTemplate;
+  transaction_template: TransactionTemplate;
 }
 
 interface ProcessResult {
   processed: number;
-  created_flows: string[];
+  created_transactions: string[];
   errors: { schedule_id: string; error: string }[];
 }
 
 export class ProcessRecurringTask {
   private supabase: SupabaseClient;
+  private exchangeRates: Map<string, number> = new Map();
 
   constructor() {
     const supabaseUrl = process.env.SUPABASE_URL;
@@ -73,8 +74,55 @@ export class ProcessRecurringTask {
     });
   }
 
+  /**
+   * Fetch all exchange rates from database
+   */
+  private async loadExchangeRates(): Promise<void> {
+    const { data, error } = await this.supabase
+      .from('currency_exchange')
+      .select('code, rate');
+
+    if (error) {
+      console.log('⚠ Failed to load exchange rates:', error.message);
+      return;
+    }
+
+    this.exchangeRates = new Map();
+    (data || []).forEach((rate: { code: string; rate: number }) => {
+      this.exchangeRates.set(rate.code.toLowerCase(), rate.rate);
+    });
+    console.log(`Loaded ${this.exchangeRates.size} exchange rates`);
+  }
+
+  /**
+   * Convert amount from one currency to another
+   */
+  private convertCurrency(amount: number, fromCurrency: string, toCurrency: string): number {
+    const fromCode = fromCurrency.toLowerCase();
+    const toCode = toCurrency.toLowerCase();
+
+    if (fromCode === toCode) {
+      return amount;
+    }
+
+    const fromRate = fromCode === 'usd' ? 1 : this.exchangeRates.get(fromCode);
+    const toRate = toCode === 'usd' ? 1 : this.exchangeRates.get(toCode);
+
+    if (fromRate === undefined || toRate === undefined) {
+      console.log(`    ⚠ Exchange rate not found for ${fromCurrency} -> ${toCurrency}, using original amount`);
+      return amount;
+    }
+
+    // Convert to USD first, then to target currency
+    const amountInUsd = fromCode === 'usd' ? amount : amount / fromRate;
+    return toCode === 'usd' ? amountInUsd : amountInUsd * toRate;
+  }
+
   async run(): Promise<void> {
     console.log('Processing recurring schedules...');
+
+    // Load exchange rates for currency conversion
+    await this.loadExchangeRates();
 
     const today = new Date().toISOString().split('T')[0];
     console.log(`Today: ${today}`);
@@ -99,7 +147,7 @@ export class ProcessRecurringTask {
 
     const result: ProcessResult = {
       processed: 0,
-      created_flows: [],
+      created_transactions: [],
       errors: [],
     };
 
@@ -110,25 +158,38 @@ export class ProcessRecurringTask {
         console.log(`  Frequency: ${schedule.frequency}`);
         console.log(`  Next run date: ${schedule.next_run_date}`);
 
-        const template = schedule.flow_template;
-        console.log(`  Flow type: ${template.type}, Amount: ${template.amount} ${template.currency}`);
+        const template = schedule.transaction_template;
+        console.log(`  Transaction type: ${template.type}, Amount: ${template.amount} ${template.currency}`);
 
-        // Create the flow
-        const { data: newFlow, error: flowError } = await this.supabase
-          .from('flows')
+        // Determine asset_id based on transaction type
+        // - income: to_asset_id (where money goes)
+        // - expense/debt_payment: from_asset_id (where money comes from)
+        // - buy: to_asset_id (investment being bought)
+        // - sell: from_asset_id (investment being sold)
+        let assetId: string | null = null;
+        if (template.type === 'income' || template.type === 'buy') {
+          assetId = template.to_asset_id;
+        } else if (template.type === 'expense' || template.type === 'debt_payment' || template.type === 'sell') {
+          assetId = template.from_asset_id;
+        } else {
+          assetId = template.to_asset_id || template.from_asset_id;
+        }
+
+        // Create the transaction (transactions table uses belong_id, not user_id)
+        const { data: newTransaction, error: txError } = await this.supabase
+          .from('transactions')
           .insert({
-            user_id: schedule.user_id,
+            belong_id: schedule.belong_id,
             type: template.type,
             amount: template.amount,
             currency: template.currency,
-            from_asset_id: template.from_asset_id,
-            to_asset_id: template.to_asset_id,
+            asset_id: assetId,
+            source_asset_id: template.type === 'income' ? null : template.from_asset_id,
             debt_id: template.debt_id,
             category: template.category,
             date: schedule.next_run_date,
             description: template.description,
-            recurring_frequency: null, // Generated flows are not recurring themselves
-            flow_expense_category_id: template.flow_expense_category_id,
+            expense_category_id: template.expense_category_id,
             schedule_id: schedule.id,
             metadata: template.metadata,
             needs_review: false,
@@ -136,19 +197,19 @@ export class ProcessRecurringTask {
           .select()
           .single();
 
-        if (flowError || !newFlow) {
+        if (txError || !newTransaction) {
           result.errors.push({
             schedule_id: schedule.id,
-            error: flowError?.message || 'Failed to create flow',
+            error: txError?.message || 'Failed to create transaction',
           });
-          console.log(`  ✗ Failed to create flow: ${flowError?.message}`);
+          console.log(`  ✗ Failed to create transaction: ${txError?.message}`);
           continue;
         }
 
-        result.created_flows.push(newFlow.id);
-        console.log(`  ✓ Created flow ${newFlow.id.slice(0, 8)}...`);
+        result.created_transactions.push(newTransaction.id);
+        console.log(`  ✓ Created transaction ${newTransaction.id.slice(0, 8)}...`);
 
-        // Adjust asset balances based on flow type
+        // Adjust asset balances based on transaction type
         await this.adjustAssetBalances(template, schedule.next_run_date);
 
         // Calculate next run date
@@ -184,7 +245,7 @@ export class ProcessRecurringTask {
     console.log('\n========================================');
     console.log('Summary:');
     console.log(`  Schedules processed: ${result.processed}`);
-    console.log(`  Flows created: ${result.created_flows.length}`);
+    console.log(`  Transactions created: ${result.created_transactions.length}`);
     console.log(`  Errors: ${result.errors.length}`);
 
     if (result.errors.length > 0) {
@@ -196,41 +257,47 @@ export class ProcessRecurringTask {
   }
 
   /**
-   * Adjust asset balances based on flow template
+   * Adjust asset balances based on transaction template
    */
-  private async adjustAssetBalances(template: FlowTemplate, _date: string): Promise<void> {
+  private async adjustAssetBalances(template: TransactionTemplate, _date: string): Promise<void> {
     const amount = template.amount;
+    const txCurrency = template.currency;
 
     if (template.type === 'income' && template.to_asset_id) {
       // Income: add to to_asset
-      await this.updateAssetBalance(template.to_asset_id, amount);
+      await this.updateAssetBalance(template.to_asset_id, amount, txCurrency);
     } else if (template.type === 'expense' && template.from_asset_id) {
       // Expense: subtract from from_asset
-      await this.updateAssetBalance(template.from_asset_id, -amount);
-    } else if (template.type === 'transfer') {
-      // Transfer: subtract from from_asset, add to to_asset
+      await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
+    } else if (template.type === 'buy') {
+      // Buy: subtract from source (cash), add to investment
       if (template.from_asset_id) {
-        await this.updateAssetBalance(template.from_asset_id, -amount);
+        await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
       }
+    } else if (template.type === 'sell') {
+      // Sell: add to destination (cash)
       if (template.to_asset_id) {
-        await this.updateAssetBalance(template.to_asset_id, amount);
+        await this.updateAssetBalance(template.to_asset_id, amount, txCurrency);
       }
     }
 
     // Handle debt payments
-    if (template.debt_id && template.category === 'pay_debt') {
-      await this.updateDebtBalance(template.debt_id, -amount);
+    if (template.debt_id && template.type === 'debt_payment') {
+      await this.updateDebtBalance(template.debt_id, -amount, txCurrency);
+      if (template.from_asset_id) {
+        await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
+      }
     }
   }
 
   /**
-   * Update asset balance by delta amount
+   * Update asset balance by delta amount (with currency conversion)
    */
-  private async updateAssetBalance(assetId: string, delta: number): Promise<void> {
-    // Get current balance
+  private async updateAssetBalance(assetId: string, delta: number, txCurrency: string): Promise<void> {
+    // Get current balance and currency
     const { data: asset, error: fetchError } = await this.supabase
       .from('assets')
-      .select('balance')
+      .select('balance, currency')
       .eq('id', assetId)
       .single();
 
@@ -239,7 +306,11 @@ export class ProcessRecurringTask {
       return;
     }
 
-    const newBalance = (asset.balance || 0) + delta;
+    // Convert delta to asset currency if different
+    const assetCurrency = asset.currency || 'USD';
+    const convertedDelta = this.convertCurrency(delta, txCurrency, assetCurrency);
+    // Prevent negative balance - set to zero if calculation would go negative
+    const newBalance = Math.max(0, (asset.balance || 0) + convertedDelta);
 
     const { error: updateError } = await this.supabase
       .from('assets')
@@ -253,18 +324,19 @@ export class ProcessRecurringTask {
     if (updateError) {
       console.log(`    ⚠ Failed to update asset balance: ${updateError.message}`);
     } else {
-      const sign = delta >= 0 ? '+' : '';
-      console.log(`    Asset balance updated: ${sign}${delta} (new: ${newBalance})`);
+      const sign = convertedDelta >= 0 ? '+' : '';
+      const currencyNote = txCurrency !== assetCurrency ? ` (converted from ${txCurrency})` : '';
+      console.log(`    Asset balance updated: ${sign}${convertedDelta.toFixed(2)} ${assetCurrency}${currencyNote} (new: ${newBalance.toFixed(2)})`);
     }
   }
 
   /**
-   * Update debt balance by delta amount
+   * Update debt balance by delta amount (with currency conversion)
    */
-  private async updateDebtBalance(debtId: string, delta: number): Promise<void> {
+  private async updateDebtBalance(debtId: string, delta: number, txCurrency: string): Promise<void> {
     const { data: debt, error: fetchError } = await this.supabase
       .from('debts')
-      .select('current_balance')
+      .select('current_balance, currency')
       .eq('id', debtId)
       .single();
 
@@ -273,7 +345,10 @@ export class ProcessRecurringTask {
       return;
     }
 
-    const newBalance = Math.max(0, (debt.current_balance || 0) + delta);
+    // Convert delta to debt currency if different
+    const debtCurrency = debt.currency || 'USD';
+    const convertedDelta = this.convertCurrency(delta, txCurrency, debtCurrency);
+    const newBalance = Math.max(0, (debt.current_balance || 0) + convertedDelta);
 
     const updates: Record<string, unknown> = {
       current_balance: newBalance,
@@ -285,7 +360,7 @@ export class ProcessRecurringTask {
     if (newBalance <= 0) {
       updates.status = 'paid_off';
       updates.paid_off_date = new Date().toISOString().split('T')[0];
-      console.log(`    Debt paid off!`);
+      console.log(`    🎉 Debt paid off!`);
     }
 
     const { error: updateError } = await this.supabase
@@ -296,8 +371,9 @@ export class ProcessRecurringTask {
     if (updateError) {
       console.log(`    ⚠ Failed to update debt balance: ${updateError.message}`);
     } else {
-      const sign = delta >= 0 ? '+' : '';
-      console.log(`    Debt balance updated: ${sign}${delta} (new: ${newBalance})`);
+      const sign = convertedDelta >= 0 ? '+' : '';
+      const currencyNote = txCurrency !== debtCurrency ? ` (converted from ${txCurrency})` : '';
+      console.log(`    Debt balance updated: ${sign}${convertedDelta.toFixed(2)} ${debtCurrency}${currencyNote} (new: ${newBalance.toFixed(2)})`);
     }
   }
 

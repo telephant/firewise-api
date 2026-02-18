@@ -243,12 +243,12 @@ GROUP BY a.id;
 ### Flow Endpoints
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/flows` | List user's flows (with filters) |
-| POST | `/api/flows` | Create flow (auto-creates asset if needed) |
-| GET | `/api/flows/:id` | Get single flow |
-| PUT | `/api/flows/:id` | Update flow |
-| DELETE | `/api/flows/:id` | Delete flow |
-| GET | `/api/flows/stats` | Flow statistics |
+| GET | `/api/transactions` | List user's flows (with filters) |
+| POST | `/api/transactions` | Create flow (auto-creates asset if needed) |
+| GET | `/api/transactions/:id` | Get single flow |
+| PUT | `/api/transactions/:id` | Update flow |
+| DELETE | `/api/transactions/:id` | Delete flow |
+| GET | `/api/transactions/stats` | Flow statistics |
 
 ### Asset Endpoints
 | Method | Endpoint | Description |
@@ -298,14 +298,14 @@ firewise-web/src/app/
     fire/
       page.tsx              # Main FIRE dashboard at /fire
       flows/
-        page.tsx            # Flow list view at /fire/flows
+        page.tsx            # Flow list view at /fire/transactions
       assets/
         page.tsx            # Asset list view at /fire/assets
 ```
 
 ### URL Structure
 - `/fire` → FIRE Dashboard (homepage with metrics, assets, flow map)
-- `/fire/flows` → Flow list view
+- `/fire/transactions` → Flow list view
 - `/fire/assets` → Asset list view
 - `/dashboard` → Expense tracker (unchanged)
 

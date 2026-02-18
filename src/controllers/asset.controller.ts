@@ -6,6 +6,33 @@ import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getUserPreferenc
 import { fetchStockPrice, fetchStockPrices } from '../utils/stock-price';
 import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
+// Metal configuration - maps metal_type to Yahoo Finance symbol
+const METAL_CONFIG: Record<string, { symbol: string; priceUnit: 'troy_oz' | 'pound' }> = {
+  gold: { symbol: 'GC=F', priceUnit: 'troy_oz' },
+  silver: { symbol: 'SI=F', priceUnit: 'troy_oz' },
+};
+
+// Conversion factors to grams
+const UNIT_TO_GRAMS: Record<string, number> = {
+  gram: 1,
+  kg: 1000,
+  oz: 28.3495,      // avoirdupois ounce
+  troy_oz: 31.1035, // troy ounce (used for precious metals)
+  pound: 453.592,
+};
+
+/**
+ * Convert metal price from Yahoo's unit to user's unit
+ * Yahoo returns price per troy_oz (gold/silver) or per pound (copper)
+ */
+function convertMetalPrice(yahooPrice: number, fromUnit: 'troy_oz' | 'pound', toUnit: string): number {
+  const fromGrams = UNIT_TO_GRAMS[fromUnit] || 1;
+  const toGrams = UNIT_TO_GRAMS[toUnit] || 1;
+  // Price per gram = yahooPrice / fromGrams
+  // Price per toUnit = (yahooPrice / fromGrams) * toGrams
+  return (yahooPrice / fromGrams) * toGrams;
+}
+
 interface StockAssetResult extends Asset {
   stock_price?: number;
   stock_currency?: string;
@@ -15,8 +42,8 @@ interface StockAssetResult extends Asset {
 }
 
 /**
- * Add stock prices and converted values to stock/ETF assets
- * Balance remains as shares, but we calculate and convert market_value
+ * Add stock/metal prices and converted values to stock/ETF/metals assets
+ * Balance remains as shares/weight, but we calculate and convert market_value
  */
 async function addStockPricesAndConversion(
   assets: Asset[],
@@ -26,15 +53,26 @@ async function addStockPricesAndConversion(
   const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
   const tickers = [...new Set(stockAssets.map(a => a.ticker!))];
 
-  // Fetch all stock prices in parallel
-  const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+  // Find all metal assets and get their Yahoo symbols
+  const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
+  const metalSymbols = [...new Set(
+    metalAssets
+      .map(a => METAL_CONFIG[a.metadata?.metal_type as string]?.symbol)
+      .filter((s): s is string => !!s)
+  )];
+
+  // Combine all symbols to fetch
+  const allSymbols = [...tickers, ...metalSymbols];
+
+  // Fetch all prices in parallel
+  const pricePromises = allSymbols.map(symbol => fetchStockPrice(symbol));
   const priceResults = await Promise.all(pricePromises);
 
   // Create price map
   const priceMap = new Map<string, { price: number; currency: string }>();
-  tickers.forEach((ticker, index) => {
+  allSymbols.forEach((symbol, index) => {
     if (priceResults[index]) {
-      priceMap.set(ticker, priceResults[index]!);
+      priceMap.set(symbol, priceResults[index]!);
     }
   });
 
@@ -50,8 +88,9 @@ async function addStockPricesAndConversion(
   // Get exchange rates
   const rateMap = await getExchangeRates(Array.from(currencies));
 
-  // Add stock_price, market_value, and converted_balance to assets
+  // Add prices, market_value, and converted_balance to assets
   return assets.map(asset => {
+    // Handle stocks/ETFs
     if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
       const stockPrice = priceMap.get(asset.ticker);
       if (stockPrice) {
@@ -71,6 +110,38 @@ async function addStockPricesAndConversion(
         };
       }
     }
+
+    // Handle metals
+    if (asset.type === 'metals' && asset.metadata?.metal_type) {
+      const metalType = asset.metadata.metal_type as string;
+      const metalConfig = METAL_CONFIG[metalType];
+      if (metalConfig) {
+        const metalPrice = priceMap.get(metalConfig.symbol);
+        if (metalPrice) {
+          // Get the user's unit (e.g., gram, kg, oz)
+          const userUnit = (asset.metadata.metal_unit as string) || 'gram';
+
+          // Convert Yahoo price (per troy_oz or pound) to user's unit
+          const pricePerUserUnit = convertMetalPrice(metalPrice.price, metalConfig.priceUnit, userUnit);
+
+          // Calculate market value: weight * price_per_unit (in USD)
+          const marketValue = asset.balance * pricePerUserUnit;
+
+          // Convert to user's preferred currency
+          const conversion = convertAmount(marketValue, metalPrice.currency, preferredCurrency, rateMap);
+
+          return {
+            ...asset,
+            stock_price: pricePerUserUnit,  // Price per user's unit
+            stock_currency: metalPrice.currency,
+            market_value: marketValue,
+            converted_balance: conversion ? Math.round(conversion.converted * 100) / 100 : marketValue,
+            converted_currency: preferredCurrency,
+          };
+        }
+      }
+    }
+
     return asset;
   });
 }
@@ -125,12 +196,13 @@ export const getAssets = async (
     // Add stock prices and convert to preferred currency for stock/ETF assets
     const assetsWithStockPrices = await addStockPricesAndConversion(assets || [], preferredCurrency);
 
-    // Add currency conversion fields for non-stock assets
-    // Stock assets already have converted_balance from addStockPricesAndConversion
+    // Add currency conversion fields for non-stock/non-metal assets
+    // Stock/ETF/Metal assets already have converted_balance from addStockPricesAndConversion
     const assetsWithConversion = await addConvertedFieldsToArray(
       assetsWithStockPrices.map(a => {
-        // For stock/ETF: skip balance conversion (already handled above)
-        if ((a.type === 'stock' || a.type === 'etf') && a.stock_price) {
+        // For stock/ETF/metals: skip balance conversion (already handled above)
+        if (((a.type === 'stock' || a.type === 'etf') && a.stock_price) ||
+            (a.type === 'metals' && a.converted_balance !== undefined)) {
           return { ...a, skip_balance_conversion: true };
         }
         return a;
@@ -148,6 +220,51 @@ export const getAssets = async (
   } catch (err) {
     if (err instanceof AppError) throw err;
     res.status(500).json({ success: false, error: 'Failed to fetch assets' });
+  }
+};
+
+/**
+ * Get the default cash account (first cash account)
+ * GET /api/fire/assets/default-cash
+ * Used by chat agent for prefetching
+ */
+export const getDefaultCashAccount = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<{ id: string; name: string } | null>>
+): Promise<void> => {
+  try {
+    const viewContext = await getViewContext(req);
+
+    // Get first cash account
+    let query = supabaseAdmin
+      .from('assets')
+      .select('id, name')
+      .eq('type', 'cash')
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    query = applyOwnershipFilter(query, viewContext);
+
+    const { data: assets, error } = await query;
+
+    if (error) {
+      throw new AppError('Failed to fetch default cash account', 500);
+    }
+
+    if (assets && assets.length > 0) {
+      res.json({
+        success: true,
+        data: { id: assets[0].id, name: assets[0].name },
+      });
+    } else {
+      res.json({
+        success: true,
+        data: null,
+      });
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    res.status(500).json({ success: false, error: 'Failed to fetch default cash account' });
   }
 };
 
@@ -181,11 +298,14 @@ export const getAsset = async (
     // Add stock price and convert to preferred currency for stock/ETF assets
     const [assetWithStockPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
 
-    // Add currency conversion fields (skip for stocks - already handled above)
+    // Add currency conversion fields (skip for stocks/metals - already handled above)
     const assetWithConversion = await addConvertedFieldsToSingle(
       {
         ...assetWithStockPrice,
-        skip_balance_conversion: (asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price ? true : undefined,
+        skip_balance_conversion: (
+          ((asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price) ||
+          (asset.type === 'metals' && assetWithStockPrice.converted_balance !== undefined)
+        ) ? true : undefined,
       },
       userId
     );
@@ -210,7 +330,7 @@ export const createAsset = async (
   try {
     const userId = req.user!.id;
     const viewContext = await getViewContext(req);
-    const { name, type, ticker, currency, market, metadata } = req.body;
+    const { name, type, ticker, currency, market, metadata, balance, belong_id } = req.body;
 
     // Validation
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -223,14 +343,28 @@ export const createAsset = async (
       return;
     }
 
-    const validTypes = ['cash', 'deposit', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'other'];
+    const validTypes = ['cash', 'deposit', 'stock', 'etf', 'bond', 'real_estate', 'crypto', 'metals', 'other'];
     if (!validTypes.includes(type)) {
       res.status(400).json({ success: false, error: 'Invalid asset type' });
       return;
     }
 
-    // Get ownership values based on view mode (personal or family)
-    const ownershipValues = buildOwnershipValues(viewContext);
+    // Determine ownership: use provided belong_id or default to view context
+    let ownershipValues: { user_id: string; belong_id: string };
+    if (belong_id) {
+      // Use explicitly provided belong_id (must be user's own ID or their family ID)
+      const validBelongIds = [userId];
+      if (viewContext.familyId) validBelongIds.push(viewContext.familyId);
+
+      if (!validBelongIds.includes(belong_id)) {
+        res.status(400).json({ success: false, error: 'Invalid belong_id' });
+        return;
+      }
+      ownershipValues = { user_id: userId, belong_id };
+    } else {
+      // Default: use current view context
+      ownershipValues = buildOwnershipValues(viewContext);
+    }
 
     const { data: asset, error } = await supabaseAdmin
       .from('assets')
@@ -242,6 +376,8 @@ export const createAsset = async (
         currency: currency || 'USD',
         market: market || null,
         metadata: metadata || null,
+        balance: balance ?? 0,
+        balance_updated_at: balance ? new Date().toISOString() : null,
       })
       .select()
       .single();
@@ -263,6 +399,7 @@ export const createAsset = async (
 
 /**
  * Update an existing asset
+ * If balance changes, creates an adjustment transaction atomically
  */
 export const updateAsset = async (
   req: AuthenticatedRequest,
@@ -274,8 +411,8 @@ export const updateAsset = async (
     const { id } = req.params;
     const { name, type, ticker, currency, market, metadata, balance } = req.body;
 
-    // Check if asset exists and belongs to user/family
-    let checkQuery = supabaseAdmin.from('assets').select('id');
+    // Fetch existing asset with current balance
+    let checkQuery = supabaseAdmin.from('assets').select('*');
     checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
 
     const { data: existingAsset, error: fetchError } = await checkQuery.single();
@@ -292,6 +429,8 @@ export const updateAsset = async (
     if (currency !== undefined) updates.currency = currency;
     if (market !== undefined) updates.market = market || null;
     if (metadata !== undefined) updates.metadata = metadata;
+
+    // Update balance if provided
     if (balance !== undefined) {
       updates.balance = parseFloat(balance);
       updates.balance_updated_at = new Date().toISOString();
@@ -312,7 +451,26 @@ export const updateAsset = async (
       throw new AppError('Failed to update asset', 500);
     }
 
-    res.json({ success: true, data: asset });
+    // Get user preferences for currency
+    const prefs = await getUserPreferences(userId);
+    const preferredCurrency = prefs?.preferred_currency || 'USD';
+
+    // Add stock/metal price and convert to preferred currency
+    const [assetWithPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
+
+    // Add currency conversion fields (skip for stocks/metals - already handled above)
+    const assetWithConversion = await addConvertedFieldsToSingle(
+      {
+        ...assetWithPrice,
+        skip_balance_conversion: (
+          ((asset.type === 'stock' || asset.type === 'etf') && assetWithPrice.stock_price) ||
+          (asset.type === 'metals' && assetWithPrice.converted_balance !== undefined)
+        ) ? true : undefined,
+      },
+      userId
+    );
+
+    res.json({ success: true, data: assetWithConversion });
   } catch (err) {
     if (err instanceof AppError) throw err;
     res.status(500).json({ success: false, error: 'Failed to update asset' });
@@ -342,25 +500,8 @@ export const deleteAsset = async (
       return;
     }
 
-    // Check if any flows reference this asset
-    const { data: flows, error: flowsError } = await supabaseAdmin
-      .from('flows')
-      .select('id')
-      .or(`from_asset_id.eq.${id},to_asset_id.eq.${id}`)
-      .limit(1);
-
-    if (flowsError) {
-      throw new AppError('Failed to check asset usage', 500);
-    }
-
-    if (flows && flows.length > 0) {
-      res.status(400).json({
-        success: false,
-        error: 'Cannot delete asset with existing flows. Delete the flows first.',
-      });
-      return;
-    }
-
+    // Flow is now an audit log - assets can be deleted freely
+    // Flow references will be set to NULL (ON DELETE SET NULL)
     const { error } = await supabaseAdmin.from('assets').delete().eq('id', id);
 
     if (error) {
@@ -396,7 +537,8 @@ export const getNetWorthStats = async (
     const preferredCurrency = prefs?.preferred_currency || 'USD';
 
     // Build queries with family/personal context
-    let assetsQuery = supabaseAdmin.from('assets').select('id, type, ticker, balance, currency');
+    // Include metadata for metals (needed for metal_type and metal_unit)
+    let assetsQuery = supabaseAdmin.from('assets').select('id, type, ticker, balance, currency, metadata');
     assetsQuery = applyOwnershipFilter(assetsQuery, viewContext);
 
     let debtsQuery = supabaseAdmin.from('debts').select('id, current_balance, currency, status').eq('status', 'active');
@@ -422,13 +564,23 @@ export const getNetWorthStats = async (
     const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
     const tickers = [...new Set(stockAssets.map(a => a.ticker!))];
 
-    const pricePromises = tickers.map(ticker => fetchStockPrice(ticker));
+    // Find metal assets and get their Yahoo symbols
+    const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
+    const metalSymbols = [...new Set(
+      metalAssets
+        .map(a => METAL_CONFIG[(a.metadata as Record<string, unknown>)?.metal_type as string]?.symbol)
+        .filter((s): s is string => !!s)
+    )];
+
+    // Fetch all prices (stocks + metals)
+    const allSymbols = [...tickers, ...metalSymbols];
+    const pricePromises = allSymbols.map(symbol => fetchStockPrice(symbol));
     const priceResults = await Promise.all(pricePromises);
 
     const priceMap = new Map<string, { price: number; currency: string }>();
-    tickers.forEach((ticker, index) => {
+    allSymbols.forEach((symbol, index) => {
       if (priceResults[index]) {
-        priceMap.set(ticker, priceResults[index]!);
+        priceMap.set(symbol, priceResults[index]!);
       }
     });
 
@@ -455,6 +607,23 @@ export const getNetWorthStats = async (
           valueCurrency = price.currency;
         } else {
           continue; // Skip if no price available
+        }
+      } else if (asset.type === 'metals' && asset.metadata?.metal_type) {
+        // Handle metals
+        const metalType = (asset.metadata as Record<string, unknown>).metal_type as string;
+        const metalConfig = METAL_CONFIG[metalType];
+        if (metalConfig) {
+          const metalPrice = priceMap.get(metalConfig.symbol);
+          if (metalPrice) {
+            const userUnit = ((asset.metadata as Record<string, unknown>).metal_unit as string) || 'gram';
+            const pricePerUserUnit = convertMetalPrice(metalPrice.price, metalConfig.priceUnit, userUnit);
+            value = asset.balance * pricePerUserUnit;
+            valueCurrency = metalPrice.currency;
+          } else {
+            continue; // Skip if no price available
+          }
+        } else {
+          continue;
         }
       } else {
         value = asset.balance;

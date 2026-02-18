@@ -46,8 +46,8 @@ const currency_exchange_routes_1 = __importDefault(require("./currency-exchange.
 const payment_method_routes_1 = __importDefault(require("./payment-method.routes"));
 const stats_routes_1 = __importDefault(require("./stats.routes"));
 const asset_routes_1 = __importDefault(require("./asset.routes"));
-const flow_routes_1 = __importDefault(require("./flow.routes"));
-const flow_expense_category_routes_1 = __importDefault(require("./flow-expense-category.routes"));
+const transaction_log_routes_1 = __importDefault(require("./transaction-log.routes"));
+const expense_category_routes_1 = __importDefault(require("./expense-category.routes"));
 const fire_linked_ledger_routes_1 = __importDefault(require("./fire-linked-ledger.routes"));
 const fire_expense_stats_routes_1 = __importDefault(require("./fire-expense-stats.routes"));
 const stock_symbol_routes_1 = __importDefault(require("./stock-symbol.routes"));
@@ -63,6 +63,10 @@ const runway_routes_1 = __importDefault(require("./runway.routes"));
 const asset_import_routes_1 = __importDefault(require("./asset-import.routes"));
 const financial_stats_routes_1 = __importDefault(require("./financial-stats.routes"));
 const family_routes_1 = __importStar(require("./family.routes"));
+const chat_routes_1 = __importDefault(require("./chat.routes"));
+const income_routes_1 = __importDefault(require("./income.routes"));
+const fire_expense_routes_1 = __importDefault(require("./fire-expense.routes"));
+const dividend_calendar_routes_1 = __importDefault(require("./dividend-calendar.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
@@ -77,8 +81,8 @@ router.use('/ledgers/:ledgerId/payment-methods', payment_method_routes_1.default
 router.use('/ledgers/:ledgerId/stats', stats_routes_1.default);
 // User-scoped routes (FIRE management) - all under /fire prefix
 router.use('/fire/assets', asset_routes_1.default);
-router.use('/fire/flows', flow_routes_1.default);
-router.use('/fire/flow-expense-categories', flow_expense_category_routes_1.default);
+router.use('/fire/transactions', transaction_log_routes_1.default);
+router.use('/fire/expense-categories', expense_category_routes_1.default);
 router.use('/fire/linked-ledgers', fire_linked_ledger_routes_1.default);
 router.use('/fire/expense-stats', fire_expense_stats_routes_1.default);
 router.use('/fire/stock-symbols', stock_symbol_routes_1.default);
@@ -95,5 +99,10 @@ router.use('/fire/assets/import', asset_import_routes_1.default);
 router.use('/fire/financial-stats', financial_stats_routes_1.default);
 router.use('/fire/families', family_routes_1.default);
 router.use('/fire/invitations', family_routes_1.invitationRouter);
+router.use('/fire/chat', chat_routes_1.default);
+// Domain-specific transaction APIs
+router.use('/fire/income', income_routes_1.default);
+router.use('/fire/expense', fire_expense_routes_1.default);
+router.use('/fire/dividend-calendar', dividend_calendar_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map

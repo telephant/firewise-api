@@ -9,12 +9,14 @@
  * - check-dividends: Check for dividend payments and create flows
  * - process-recurring: Process due recurring schedules and create flows
  * - update-growth-rates: Fetch 5yr/10yr growth rates for assets with tickers
+ * - generate-monthly-snapshot: Generate monthly financial snapshots for all users
  */
 
 import { UpdateCurrencyTask } from './update-currency.task';
 import { CheckDividendsTask } from './check-dividends.task';
 import { ProcessRecurringTask } from './process-recurring.task';
 import { UpdateGrowthRatesTask } from './update-growth-rates.task';
+import { GenerateMonthlySnapshotTask } from './generate-monthly-snapshot.task';
 
 // Registry of all available tasks
 const TASKS: Record<string, () => Promise<void>> = {
@@ -22,6 +24,7 @@ const TASKS: Record<string, () => Promise<void>> = {
   'check-dividends': () => new CheckDividendsTask().run(),
   'process-recurring': () => new ProcessRecurringTask().run(),
   'update-growth-rates': () => new UpdateGrowthRatesTask().run(),
+  'generate-monthly-snapshot': () => new GenerateMonthlySnapshotTask().run(),
 };
 
 async function main() {

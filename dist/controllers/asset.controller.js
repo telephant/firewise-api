@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getNetWorthStats = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getAssets = void 0;
+exports.getNetWorthStats = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getDefaultCashAccount = exports.getAssets = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
 const currency_conversion_1 = require("../utils/currency-conversion");
@@ -119,6 +119,46 @@ const getAssets = async (req, res) => {
 };
 exports.getAssets = getAssets;
 /**
+ * Get the default cash account (first cash account)
+ * GET /api/fire/assets/default-cash
+ * Used by chat agent for prefetching
+ */
+const getDefaultCashAccount = async (req, res) => {
+    try {
+        const viewContext = await (0, family_context_1.getViewContext)(req);
+        // Get first cash account
+        let query = supabase_1.supabaseAdmin
+            .from('assets')
+            .select('id, name')
+            .eq('type', 'cash')
+            .order('created_at', { ascending: true })
+            .limit(1);
+        query = (0, family_context_1.applyOwnershipFilter)(query, viewContext);
+        const { data: assets, error } = await query;
+        if (error) {
+            throw new error_1.AppError('Failed to fetch default cash account', 500);
+        }
+        if (assets && assets.length > 0) {
+            res.json({
+                success: true,
+                data: { id: assets[0].id, name: assets[0].name },
+            });
+        }
+        else {
+            res.json({
+                success: true,
+                data: null,
+            });
+        }
+    }
+    catch (err) {
+        if (err instanceof error_1.AppError)
+            throw err;
+        res.status(500).json({ success: false, error: 'Failed to fetch default cash account' });
+    }
+};
+exports.getDefaultCashAccount = getDefaultCashAccount;
+/**
  * Get a single asset by ID
  */
 const getAsset = async (req, res) => {
@@ -163,7 +203,7 @@ const createAsset = async (req, res) => {
     try {
         const userId = req.user.id;
         const viewContext = await (0, family_context_1.getViewContext)(req);
-        const { name, type, ticker, currency, market, metadata } = req.body;
+        const { name, type, ticker, currency, market, metadata, balance, belong_id } = req.body;
         // Validation
         if (!name || typeof name !== 'string' || name.trim().length === 0) {
             res.status(400).json({ success: false, error: 'Name is required' });
@@ -178,8 +218,23 @@ const createAsset = async (req, res) => {
             res.status(400).json({ success: false, error: 'Invalid asset type' });
             return;
         }
-        // Get ownership values based on view mode (personal or family)
-        const ownershipValues = (0, family_context_1.buildOwnershipValues)(viewContext);
+        // Determine ownership: use provided belong_id or default to view context
+        let ownershipValues;
+        if (belong_id) {
+            // Use explicitly provided belong_id (must be user's own ID or their family ID)
+            const validBelongIds = [userId];
+            if (viewContext.familyId)
+                validBelongIds.push(viewContext.familyId);
+            if (!validBelongIds.includes(belong_id)) {
+                res.status(400).json({ success: false, error: 'Invalid belong_id' });
+                return;
+            }
+            ownershipValues = { user_id: userId, belong_id };
+        }
+        else {
+            // Default: use current view context
+            ownershipValues = (0, family_context_1.buildOwnershipValues)(viewContext);
+        }
         const { data: asset, error } = await supabase_1.supabaseAdmin
             .from('assets')
             .insert({
@@ -190,6 +245,8 @@ const createAsset = async (req, res) => {
             currency: currency || 'USD',
             market: market || null,
             metadata: metadata || null,
+            balance: balance ?? 0,
+            balance_updated_at: balance ? new Date().toISOString() : null,
         })
             .select()
             .single();
@@ -281,22 +338,8 @@ const deleteAsset = async (req, res) => {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
         }
-        // Check if any flows reference this asset
-        const { data: flows, error: flowsError } = await supabase_1.supabaseAdmin
-            .from('flows')
-            .select('id')
-            .or(`from_asset_id.eq.${id},to_asset_id.eq.${id}`)
-            .limit(1);
-        if (flowsError) {
-            throw new error_1.AppError('Failed to check asset usage', 500);
-        }
-        if (flows && flows.length > 0) {
-            res.status(400).json({
-                success: false,
-                error: 'Cannot delete asset with existing flows. Delete the flows first.',
-            });
-            return;
-        }
+        // Flow is now an audit log - assets can be deleted freely
+        // Flow references will be set to NULL (ON DELETE SET NULL)
         const { error } = await supabase_1.supabaseAdmin.from('assets').delete().eq('id', id);
         if (error) {
             throw new error_1.AppError('Failed to delete asset', 500);

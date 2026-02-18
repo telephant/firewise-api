@@ -91,36 +91,36 @@ export const getFlowFreedom = async (
     ).gt('current_balance', 0);
 
     const pendingQuery = applyOwnershipFilter(
-      supabaseAdmin.from('flows').select('type, category, from_asset_id, needs_review'),
+      supabaseAdmin.from('transactions').select('type, category, source_asset_id, needs_review'),
       viewContext
     )
       .eq('needs_review', true)
       .in('type', ['income', 'expense'])
       .gte('date', formatDate(twelveMonthsAgo));
 
-    // Fetch debts for payoff calculation and pending review flows
+    // Fetch debts for payoff calculation and pending review transactions
     const [debtsResult, pendingReviewResult] = await Promise.all([
       debtsQuery,
       pendingQuery,
     ]);
 
     const debts = (debtsResult.data || []) as Debt[];
-    const pendingFlows = pendingReviewResult.data || [];
+    const pendingTransactions = pendingReviewResult.data || [];
 
     // Calculate pending review stats
     let excludedCount = 0;
     let hasExcludedPassiveIncome = false;
     let hasExcludedExpenses = false;
 
-    pendingFlows.forEach((flow) => {
+    pendingTransactions.forEach((tx) => {
       excludedCount++;
-      if (flow.type === 'income') {
-        const isPassive = flow.from_asset_id !== null ||
-          ['dividend', 'rental', 'interest'].includes(flow.category || '');
+      if (tx.type === 'income') {
+        const isPassive = tx.source_asset_id !== null ||
+          ['dividend', 'rental', 'interest'].includes(tx.category || '');
         if (isPassive) {
           hasExcludedPassiveIncome = true;
         }
-      } else if (flow.type === 'expense') {
+      } else if (tx.type === 'expense') {
         hasExcludedExpenses = true;
       }
     });

@@ -8,6 +8,7 @@ import {
   deleteDebt,
   getDebtPayments,
   getDebtAmortization,
+  createDebtTransaction,
 } from '../controllers/debt.controller';
 
 const router = Router();
@@ -18,6 +19,10 @@ router.use(authMiddleware);
 // Debt routes (user-scoped)
 router.get('/', getDebts);
 router.post('/', createDebt);
+
+// Unified debt transaction endpoint (create debt or make payment)
+router.post('/transaction', createDebtTransaction);
+
 router.get('/:id', getDebt);
 router.put('/:id', updateDebt);
 router.delete('/:id', deleteDebt);

@@ -1,17 +1,19 @@
 /**
  * Check Dividends Task
  *
- * Checks for dividend payment dates for US stocks held by users and
- * automatically creates income flows for dividends that are paid today.
+ * Checks for dividend payment dates for US stocks/ETFs held by users and
+ * automatically creates income transactions for dividends that are paid.
  *
  * Logic:
- * 1. Get all users with US stock holdings (type='stock', market='US')
+ * 1. Get all users with US stock/ETF holdings (type='stock' or 'etf', market='US')
  * 2. For each stock, fetch dividend data from Yahoo Finance API
  * 3. Check if today is a payment date for any dividend
  * 4. For each matching dividend:
- *    - Check for duplicates (same from_asset_id + date + category='dividend')
+ *    - Check for duplicates (same source_asset_id + date + category='dividend')
  *    - Calculate gross amount: shares × dividend_per_share
- *    - Create income flow with needs_review=true
+ *    - Apply tax withholding and currency conversion
+ *    - Create income transaction with needs_review=true
+ *    - Update cash asset balance
  *
  * API: Yahoo Finance (no API key required)
  * https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?events=div
@@ -19,12 +21,14 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { getExchangeRates, convertAmount } from '../src/utils/currency-conversion';
 
 dotenv.config();
 
 interface Asset {
   id: string;
   user_id: string;
+  belong_id: string;
   name: string;
   ticker: string;
   balance: number;
@@ -47,6 +51,9 @@ interface YahooDividend {
 interface YahooChartResponse {
   chart: {
     result: Array<{
+      meta: {
+        symbol: string;
+      };
       events?: {
         dividends?: Record<string, YahooDividend>;
       };
@@ -137,43 +144,64 @@ export class CheckDividendsTask {
               continue;
             }
 
-            // Calculate gross dividend amount
-            const grossAmount = asset.balance * dividend.amount;
+            // Calculate gross dividend amount (in USD)
+            const grossAmountUsd = asset.balance * dividend.amount;
 
             // Get user's tax settings and primary cash asset in parallel
-            const [taxSettings, primaryCashAssetId] = await Promise.all([
+            const [taxSettings, primaryCashAsset] = await Promise.all([
               this.getUserTaxSettings(asset.user_id),
               this.getPrimaryCashAsset(asset.user_id),
             ]);
 
-            if (!primaryCashAssetId) {
+            if (!primaryCashAsset) {
               console.log(`      No cash asset found for user ${asset.user_id.slice(0, 8)}..., skipping`);
               continue;
             }
 
-            // Calculate tax using user's settings
+            // Calculate tax using user's settings (in USD)
             const taxRate = taxSettings.us_dividend_withholding_rate;
-            const taxWithheld = grossAmount * taxRate;
-            const netAmount = grossAmount - taxWithheld;
+            const taxWithheldUsd = grossAmountUsd * taxRate;
+            const netAmountUsd = grossAmountUsd - taxWithheldUsd;
 
-            // Create dividend income flow (amount is GROSS, tax info in metadata)
+            // Convert to cash asset's currency if different from USD
+            const targetCurrency = primaryCashAsset.currency;
+            let finalAmount = netAmountUsd;
+            let finalTaxWithheld = taxWithheldUsd;
+            let flowCurrency = 'USD';
+
+            if (targetCurrency.toUpperCase() !== 'USD') {
+              const rateMap = await getExchangeRates(['USD', targetCurrency]);
+              const conversion = convertAmount(netAmountUsd, 'USD', targetCurrency, rateMap);
+              const taxConversion = convertAmount(taxWithheldUsd, 'USD', targetCurrency, rateMap);
+
+              if (conversion && taxConversion) {
+                finalAmount = Math.round(conversion.converted * 100) / 100;
+                finalTaxWithheld = Math.round(taxConversion.converted * 100) / 100;
+                flowCurrency = targetCurrency;
+                console.log(`      Converting: $${netAmountUsd.toFixed(2)} USD → ${finalAmount.toFixed(2)} ${targetCurrency} (rate: ${conversion.rate.toFixed(4)})`);
+              }
+            }
+
+            // Create dividend income transaction (amount is NET, in cash asset's currency)
             await this.createDividendFlow({
               userId: asset.user_id,
+              belongId: asset.belong_id,
               fromAssetId: asset.id,
-              toAssetId: primaryCashAssetId,
-              amount: netAmount, // Store Net amount
-              currency: 'USD',
+              toAssetId: primaryCashAsset.id,
+              toAssetBalance: primaryCashAsset.balance,
+              amount: finalAmount,
+              currency: flowCurrency,
               date: dividendDate,
               stockName: asset.name,
               ticker: asset.ticker,
               dividendPerShare: dividend.amount,
               shares: asset.balance,
               taxRate: taxRate,
-              taxWithheld: taxWithheld,
+              taxWithheld: finalTaxWithheld,
             });
 
             dividendsCreated++;
-            console.log(`      Created dividend flow: ${asset.name} - gross: $${grossAmount.toFixed(2)}, tax (${(taxRate * 100).toFixed(0)}%): $${taxWithheld.toFixed(2)}, net: $${netAmount.toFixed(2)}`);
+            console.log(`      Created dividend flow: ${asset.name} - gross: $${grossAmountUsd.toFixed(2)}, tax (${(taxRate * 100).toFixed(0)}%): $${taxWithheldUsd.toFixed(2)}, net: ${finalAmount.toFixed(2)} ${flowCurrency}`);
           }
         }
       } catch (error) {
@@ -192,8 +220,8 @@ export class CheckDividendsTask {
   private async getUSStockAssets(): Promise<UserAsset[]> {
     const { data, error } = await this.supabase
       .from('assets')
-      .select('id, user_id, name, ticker, balance, currency')
-      .eq('type', 'stock')
+      .select('id, user_id, belong_id, name, ticker, balance, currency')
+      .in('type', ['stock', 'etf'])
       .eq('market', 'US')
       .gt('balance', 0)
       .not('ticker', 'is', null);
@@ -263,13 +291,13 @@ export class CheckDividendsTask {
   }
 
   /**
-   * Check if a dividend flow already exists for this asset and date
+   * Check if a dividend transaction already exists for this asset and date
    */
   private async checkDuplicateDividend(assetId: string, date: string): Promise<boolean> {
     const { data, error } = await this.supabase
-      .from('flows')
+      .from('transactions')
       .select('id')
-      .eq('from_asset_id', assetId)
+      .eq('source_asset_id', assetId)
       .eq('date', date)
       .eq('category', 'dividend')
       .limit(1);
@@ -303,15 +331,14 @@ export class CheckDividendsTask {
   }
 
   /**
-   * Get user's primary cash asset (first USD cash asset)
+   * Get user's primary cash asset (first cash asset)
    */
-  private async getPrimaryCashAsset(userId: string): Promise<string | null> {
+  private async getPrimaryCashAsset(userId: string): Promise<{ id: string; currency: string; balance: number } | null> {
     const { data, error } = await this.supabase
       .from('assets')
-      .select('id')
+      .select('id, currency, balance')
       .eq('user_id', userId)
       .eq('type', 'cash')
-      .eq('currency', 'USD')
       .order('created_at', { ascending: true })
       .limit(1)
       .single();
@@ -320,17 +347,20 @@ export class CheckDividendsTask {
       return null;
     }
 
-    return data.id;
+    return { id: data.id, currency: data.currency, balance: data.balance };
   }
 
   /**
-   * Create a dividend income flow
+   * Create a dividend income transaction
    * Note: amount is NET (after tax). Tax info stored in metadata.
+   * Also updates the cash asset balance.
    */
   private async createDividendFlow(params: {
     userId: string;
+    belongId: string;
     fromAssetId: string;
     toAssetId: string;
+    toAssetBalance: number;
     amount: number; // NET amount (after tax)
     currency: string;
     date: string;
@@ -341,20 +371,35 @@ export class CheckDividendsTask {
     taxRate: number;
     taxWithheld: number;
   }): Promise<void> {
-    const { error } = await this.supabase.from('flows').insert({
-      user_id: params.userId,
+    // Update cash asset balance
+    const newBalance = params.toAssetBalance + params.amount;
+    const { error: updateError } = await this.supabase
+      .from('assets')
+      .update({
+        balance: newBalance,
+        balance_updated_at: new Date().toISOString(),
+      })
+      .eq('id', params.toAssetId);
+
+    if (updateError) {
+      throw new Error(`Failed to update cash balance: ${updateError.message}`);
+    }
+
+    // Create transaction record
+    const { error } = await this.supabase.from('transactions').insert({
+      belong_id: params.belongId,
       type: 'income',
+      category: 'dividend',
       amount: params.amount, // NET amount
       currency: params.currency,
-      from_asset_id: params.fromAssetId,
-      to_asset_id: params.toAssetId,
-      category: 'dividend',
       date: params.date,
+      asset_id: params.toAssetId,  // Primary: cash account receiving dividend
+      source_asset_id: params.fromAssetId,  // Source: stock paying dividend
       description: `Dividend from ${params.stockName} (${params.ticker})`,
       needs_review: true,
       metadata: {
         dividend_per_share: params.dividendPerShare,
-        share_count: params.shares, // Use share_count instead of shares to avoid triggering balance recalculation
+        share_count: params.shares,
         ticker: params.ticker,
         payment_date: params.date,
         tax_rate: params.taxRate,
@@ -363,7 +408,7 @@ export class CheckDividendsTask {
     });
 
     if (error) {
-      throw new Error(`Failed to create dividend flow: ${error.message}`);
+      throw new Error(`Failed to create dividend transaction: ${error.message}`);
     }
   }
 }

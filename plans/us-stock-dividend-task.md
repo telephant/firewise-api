@@ -37,8 +37,8 @@ ALTER TABLE flows ADD CONSTRAINT valid_flow CHECK (
 
 - Remove validation that blocks `from_asset_id` on income flows
 - Add `needs_review` to create/update flow
-- Add filter support: `GET /api/fire/flows?needs_review=true`
-- Add endpoint to mark flow as reviewed: `PATCH /api/fire/flows/:id/review`
+- Add filter support: `GET /api/fire/transactions?needs_review=true`
+- Add endpoint to mark flow as reviewed: `PATCH /api/fire/transactions/:id/review`
 
 ### 3. Update Flow Types (API)
 **File:** `src/types/index.ts`

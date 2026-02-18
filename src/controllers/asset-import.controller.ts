@@ -219,13 +219,18 @@ export const confirmImport = async (
       } else {
         // Create new asset with ownership values (user_id + belong_id)
         const ownershipValues = buildOwnershipValues(viewContext);
+
+        // Default market to 'US' for stocks/ETFs with tickers (most common case for broker imports)
+        const inferredMarket = asset.market ||
+          ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker ? 'US' : null);
+
         const newAsset = {
           ...ownershipValues,
           name: asset.name,
           type: asset.type,
           ticker: asset.ticker,
           currency: asset.currency,
-          market: asset.market,
+          market: inferredMarket,
           balance: asset.shares,
           balance_updated_at: new Date().toISOString(),
           created_at: new Date().toISOString(),

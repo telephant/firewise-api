@@ -76,15 +76,15 @@ export const getExpenseStats = async (
     const preferredCurrency = userPrefs?.preferred_currency || 'USD';
     const shouldConvert = userPrefs?.convert_all_to_preferred || false;
 
-    // Build flows query with family/personal context (using simple belong_id filter)
-    const flowsQuery = applyOwnershipFilter(
-      supabaseAdmin.from('flows').select(`
+    // Build transactions query with family/personal context (using simple belong_id filter)
+    const transactionsQuery = applyOwnershipFilter(
+      supabaseAdmin.from('transactions').select(`
         type,
         amount,
         currency,
         date,
-        flow_expense_category_id,
-        flow_expense_category:flow_expense_categories(id, name, icon)
+        expense_category_id,
+        expense_category:flow_expense_categories(id, name, icon)
       `),
       viewContext
     )
@@ -92,39 +92,39 @@ export const getExpenseStats = async (
       .gte('date', formatDate(sixMonthsAgoStart))
       .lte('date', formatDate(currentMonthEnd));
 
-    // Single query to get all flows for 6+ months (income + expense)
+    // Single query to get all transactions for 6+ months (income + expense)
     // This is more efficient than multiple queries
-    const [flowsResult, linkedLedgersResult] = await Promise.all([
-      flowsQuery,
+    const [transactionsResult, linkedLedgersResult] = await Promise.all([
+      transactionsQuery,
       applyOwnershipFilter(
         supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
         viewContext
       ),
     ]);
 
-    if (flowsResult.error) {
-      console.error('Error fetching flows:', flowsResult.error);
+    if (transactionsResult.error) {
+      console.error('Error fetching transactions:', transactionsResult.error);
       throw new AppError('Failed to fetch expense stats', 500);
     }
 
-    const flows = flowsResult.data || [];
+    const transactions = transactionsResult.data || [];
     const currentMonthStartStr = formatDate(currentMonthStart);
     const previousMonthStartStr = formatDate(previousMonthStart);
 
     // Helper to get month key (YYYY-MM) from date string
     const getMonthKey = (dateStr: string) => dateStr.substring(0, 7);
 
-    // Collect all unique currencies from flows for exchange rate lookup
-    const flowCurrencies = new Set<string>();
-    flowCurrencies.add(preferredCurrency.toLowerCase());
-    flows.forEach((flow) => {
-      if (flow.currency) {
-        flowCurrencies.add(flow.currency.toLowerCase());
+    // Collect all unique currencies from transactions for exchange rate lookup
+    const txCurrencies = new Set<string>();
+    txCurrencies.add(preferredCurrency.toLowerCase());
+    transactions.forEach((tx) => {
+      if (tx.currency) {
+        txCurrencies.add(tx.currency.toLowerCase());
       }
     });
 
     // Fetch exchange rates for all currencies used
-    const rateMap = shouldConvert ? await getExchangeRates(Array.from(flowCurrencies)) : new Map<string, number>();
+    const rateMap = shouldConvert ? await getExchangeRates(Array.from(txCurrencies)) : new Map<string, number>();
 
     // Helper to convert amount to preferred currency
     const toPreferred = (amount: number, fromCurrency: string): number => {
@@ -133,32 +133,32 @@ export const getExpenseStats = async (
       return result ? result.converted : amount;
     };
 
-    // Process flows in a single pass
+    // Process transactions in a single pass
     let manualTotalCurrent = 0;
     let manualTotalPrevious = 0;
     let incomeThisMonth = 0;
-    let manualFlowCount = 0;
+    let manualTxCount = 0;
     const categoryTotals = new Map<string | null, { amount: number; name: string; icon: string }>();
     // Track expenses by month for average calculation (excluding current month)
     const expensesByMonth = new Map<string, number>();
 
-    flows.forEach((flow) => {
-      const rawAmount = Number(flow.amount);
-      const flowCurrency = flow.currency || 'USD';
-      const amount = toPreferred(rawAmount, flowCurrency);
-      const isCurrentMonth = flow.date >= currentMonthStartStr;
-      const isPreviousMonth = flow.date >= previousMonthStartStr && flow.date < currentMonthStartStr;
+    transactions.forEach((tx) => {
+      const rawAmount = Number(tx.amount);
+      const txCurrency = tx.currency || 'USD';
+      const amount = toPreferred(rawAmount, txCurrency);
+      const isCurrentMonth = tx.date >= currentMonthStartStr;
+      const isPreviousMonth = tx.date >= previousMonthStartStr && tx.date < currentMonthStartStr;
 
-      if (flow.type === 'income') {
+      if (tx.type === 'income') {
         if (isCurrentMonth) incomeThisMonth += amount;
-      } else if (flow.type === 'expense') {
+      } else if (tx.type === 'expense') {
         if (isCurrentMonth) {
           manualTotalCurrent += amount;
-          manualFlowCount++;
+          manualTxCount++;
 
           // Aggregate by category
-          const catId = flow.flow_expense_category_id;
-          const catInfo = flow.flow_expense_category as unknown as { id: string; name: string; icon: string } | null;
+          const catId = tx.expense_category_id;
+          const catInfo = tx.expense_category as unknown as { id: string; name: string; icon: string } | null;
           const existing = categoryTotals.get(catId);
           if (existing) {
             existing.amount += amount;
@@ -175,7 +175,7 @@ export const getExpenseStats = async (
             manualTotalPrevious += amount;
           }
           // Track all historical months for average (excluding current)
-          const monthKey = getMonthKey(flow.date);
+          const monthKey = getMonthKey(tx.date);
           expensesByMonth.set(monthKey, (expensesByMonth.get(monthKey) || 0) + amount);
         }
       }
@@ -301,7 +301,7 @@ export const getExpenseStats = async (
             percentage: Math.round(c.percentage * 10) / 10,
           })),
           source_count: {
-            manual_flows: manualFlowCount,
+            manual_flows: manualTxCount,
             linked_ledgers: linkedLedgerExpenseCount,
           },
           days_in_month: daysInMonth,

@@ -1,8 +1,8 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
-import { AuthenticatedRequest, ApiResponse, Debt, DebtFilters } from '../types';
+import { AuthenticatedRequest, ApiResponse, Debt, DebtFilters, Asset } from '../types';
 import { AppError } from '../middleware/error';
-import { addConvertedFieldsToArray, addConvertedFieldsToSingle } from '../utils/currency-conversion';
+import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getExchangeRates, convertAmount } from '../utils/currency-conversion';
 import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
 
 /**
@@ -280,7 +280,7 @@ export const updateDebt = async (
 };
 
 /**
- * Delete a debt (only if no flows reference it)
+ * Delete a debt
  */
 export const deleteDebt = async (
   req: AuthenticatedRequest,
@@ -302,25 +302,8 @@ export const deleteDebt = async (
       return;
     }
 
-    // Check if any flows reference this debt
-    const { data: flows, error: flowsError } = await supabaseAdmin
-      .from('flows')
-      .select('id')
-      .eq('debt_id', id)
-      .limit(1);
-
-    if (flowsError) {
-      throw new AppError('Failed to check debt usage', 500);
-    }
-
-    if (flows && flows.length > 0) {
-      res.status(400).json({
-        success: false,
-        error: 'Cannot delete debt with existing payments. Delete the payment flows first.',
-      });
-      return;
-    }
-
+    // Flow is now an audit log - debts can be deleted freely
+    // Flow references will be set to NULL (ON DELETE SET NULL)
     const { error } = await supabaseAdmin.from('debts').delete().eq('id', id);
 
     if (error) {
@@ -358,10 +341,10 @@ export const getDebtPayments = async (
     }
 
     const { data: payments, error, count } = await supabaseAdmin
-      .from('flows')
+      .from('transactions')
       .select('*', { count: 'exact' })
       .eq('debt_id', id)
-      .eq('category', 'pay_debt')
+      .eq('type', 'debt_payment')
       .order('date', { ascending: false });
 
     if (error) {
@@ -439,6 +422,386 @@ export const getDebtAmortization = async (
   } catch (err) {
     if (err instanceof AppError) throw err;
     res.status(500).json({ success: false, error: 'Failed to calculate amortization' });
+  }
+};
+
+/**
+ * POST /api/fire/debts/transaction
+ *
+ * Unified debt transaction endpoint:
+ * - create: Create a new debt (optionally disburse to cash)
+ * - pay: Make a debt payment
+ */
+interface DebtTransactionRequest {
+  type: 'create' | 'pay';
+
+  // For create
+  name?: string;
+  debt_type?: 'mortgage' | 'personal_loan' | 'credit_card' | 'student_loan' | 'auto_loan' | 'other';
+  principal?: number;
+  interest_rate?: number;
+  term_months?: number;
+  start_date?: string; // Loan start date
+  monthly_payment?: number; // Pre-calculated monthly payment
+  disburse_to_asset_id?: string; // Optional: cash account to receive loan proceeds
+
+  // For pay
+  debt_id?: string;
+  from_asset_id?: string; // Cash account for payment
+  recurring_frequency?: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly'; // For recurring payments
+
+  // Common
+  amount: number;
+  currency?: string;
+  date?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface DebtTransactionResult {
+  transaction_id?: string;
+  debt: Debt;
+  from_asset?: Asset;
+  to_asset?: Asset;
+}
+
+export const createDebtTransaction = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<DebtTransactionResult>>
+): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const viewContext = await getViewContext(req);
+    const ownershipValues = buildOwnershipValues(viewContext);
+
+    const {
+      type,
+      name,
+      debt_type,
+      principal,
+      interest_rate,
+      term_months,
+      start_date,
+      monthly_payment,
+      disburse_to_asset_id,
+      debt_id,
+      from_asset_id,
+      recurring_frequency,
+      amount,
+      currency = 'USD',
+      date,
+      description,
+      metadata,
+    } = req.body as DebtTransactionRequest;
+
+    // Validate type
+    if (!type || !['create', 'pay'].includes(type)) {
+      res.status(400).json({
+        success: false,
+        error: 'Valid type is required: create or pay'
+      });
+      return;
+    }
+
+    // Validate amount
+    if (amount === undefined || amount === null || isNaN(amount) || amount <= 0) {
+      res.status(400).json({ success: false, error: 'Valid positive amount is required' });
+      return;
+    }
+
+    const flowDate = date || new Date().toISOString().split('T')[0];
+
+    if (type === 'create') {
+      // Create new debt
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        res.status(400).json({ success: false, error: 'Name is required for debt creation' });
+        return;
+      }
+
+      const validDebtTypes = ['mortgage', 'personal_loan', 'credit_card', 'student_loan', 'auto_loan', 'other'];
+      if (debt_type && !validDebtTypes.includes(debt_type)) {
+        res.status(400).json({ success: false, error: 'Invalid debt type' });
+        return;
+      }
+
+      const principalAmount = principal || amount;
+
+      // Create the debt
+      const { data: debt, error: debtError } = await supabaseAdmin
+        .from('debts')
+        .insert({
+          ...ownershipValues,
+          name: name.trim(),
+          debt_type: debt_type || 'other',
+          currency: currency,
+          principal: principalAmount,
+          current_balance: principalAmount,
+          interest_rate: interest_rate || null,
+          term_months: term_months || null,
+          start_date: start_date || null,
+          monthly_payment: monthly_payment || null,
+          status: 'active',
+        })
+        .select()
+        .single();
+
+      if (debtError) {
+        if (debtError.code === '23505') {
+          res.status(400).json({ success: false, error: 'A debt with this name already exists' });
+          return;
+        }
+        throw new AppError('Failed to create debt', 500);
+      }
+
+      // Optionally disburse to cash account
+      let toAsset: Asset | undefined;
+      let flowId: string | undefined;
+
+      if (disburse_to_asset_id) {
+        const toAssetQuery = applyOwnershipFilterWithId(
+          supabaseAdmin.from('assets').select('*'),
+          disburse_to_asset_id,
+          viewContext
+        );
+        const { data: ta, error: taError } = await toAssetQuery.single();
+        if (taError || !ta) {
+          res.status(400).json({ success: false, error: 'Disburse asset not found' });
+          return;
+        }
+        toAsset = ta;
+
+        // Convert if currencies differ
+        let addAmount = principalAmount;
+        if (currency.toLowerCase() !== (ta.currency || 'USD').toLowerCase()) {
+          const rateMap = await getExchangeRates([currency.toLowerCase(), (ta.currency || 'USD').toLowerCase()]);
+          const conversion = convertAmount(principalAmount, currency, ta.currency || 'USD', rateMap);
+          if (conversion) addAmount = conversion.converted;
+        }
+
+        // Update asset balance
+        const newBalance = Number(ta.balance) + addAmount;
+        await supabaseAdmin
+          .from('assets')
+          .update({ balance: newBalance, balance_updated_at: new Date().toISOString() })
+          .eq('id', disburse_to_asset_id);
+
+        // Log disbursement transaction
+        const { data: transaction, error: txError } = await supabaseAdmin
+          .from('transactions')
+          .insert({
+            belong_id: ownershipValues.belong_id,
+            type: 'loan',
+            category: 'loan_disbursement',
+            amount: principalAmount,
+            currency: currency,
+            date: flowDate,
+            asset_id: disburse_to_asset_id,
+            debt_id: debt.id,
+            description: description || `Loan disbursement: ${name}`,
+            metadata: metadata || null,
+          })
+          .select()
+          .single();
+
+        if (txError) {
+          console.error('Disbursement transaction error:', txError);
+        } else {
+          flowId = transaction.id;
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        data: {
+          transaction_id: flowId,
+          debt: debt,
+          to_asset: toAsset,
+        },
+      });
+
+    } else if (type === 'pay') {
+      // Make debt payment
+      if (!debt_id) {
+        res.status(400).json({ success: false, error: 'debt_id is required for payment' });
+        return;
+      }
+
+      // Fetch the debt
+      const debtQuery = applyOwnershipFilterWithId(
+        supabaseAdmin.from('debts').select('*'),
+        debt_id,
+        viewContext
+      );
+      const { data: debt, error: debtError } = await debtQuery.single();
+
+      if (debtError || !debt) {
+        res.status(400).json({ success: false, error: 'Debt not found' });
+        return;
+      }
+
+      // Decrease from_asset (cash) if provided
+      let fromAsset: Asset | undefined;
+      if (from_asset_id) {
+        const fromAssetQuery = applyOwnershipFilterWithId(
+          supabaseAdmin.from('assets').select('*'),
+          from_asset_id,
+          viewContext
+        );
+        const { data: fa, error: faError } = await fromAssetQuery.single();
+        if (faError || !fa) {
+          res.status(400).json({ success: false, error: 'From asset not found' });
+          return;
+        }
+        fromAsset = fa;
+
+        // Convert if currencies differ
+        let deductAmount = amount;
+        if (currency.toLowerCase() !== (fa.currency || 'USD').toLowerCase()) {
+          const rateMap = await getExchangeRates([currency.toLowerCase(), (fa.currency || 'USD').toLowerCase()]);
+          const conversion = convertAmount(amount, currency, fa.currency || 'USD', rateMap);
+          if (conversion) deductAmount = conversion.converted;
+        }
+
+        // Update asset balance (prevent negative balance)
+        const newBalance = Math.max(0, Number(fa.balance) - deductAmount);
+        await supabaseAdmin
+          .from('assets')
+          .update({ balance: newBalance, balance_updated_at: new Date().toISOString() })
+          .eq('id', from_asset_id);
+      }
+
+      // Update debt balance
+      let paymentInDebtCurrency = amount;
+      if (currency.toLowerCase() !== (debt.currency || 'USD').toLowerCase()) {
+        const rateMap = await getExchangeRates([currency.toLowerCase(), (debt.currency || 'USD').toLowerCase()]);
+        const conversion = convertAmount(amount, currency, debt.currency || 'USD', rateMap);
+        if (conversion) paymentInDebtCurrency = conversion.converted;
+      }
+
+      const newDebtBalance = Math.max(0, Number(debt.current_balance) - paymentInDebtCurrency);
+      const debtUpdates: Record<string, unknown> = {
+        current_balance: newDebtBalance,
+        balance_updated_at: new Date().toISOString(),
+      };
+
+      // Auto-update status if paid off
+      if (newDebtBalance <= 0) {
+        debtUpdates.status = 'paid_off';
+        debtUpdates.paid_off_date = flowDate;
+      }
+
+      const { data: updatedDebt, error: updateError } = await supabaseAdmin
+        .from('debts')
+        .update(debtUpdates)
+        .eq('id', debt_id)
+        .select()
+        .single();
+
+      if (updateError) {
+        throw new AppError('Failed to update debt balance', 500);
+      }
+
+      // Log payment transaction
+      const { data: transaction, error: txError } = await supabaseAdmin
+        .from('transactions')
+        .insert({
+          belong_id: ownershipValues.belong_id,
+          type: 'debt_payment',
+          category: 'pay_debt',
+          amount: amount,
+          currency: currency,
+          date: flowDate,
+          asset_id: from_asset_id || null,  // Cash account used for payment
+          debt_id: debt_id,
+          description: description || `Payment to ${debt.name}`,
+          metadata: metadata || null,
+        })
+        .select()
+        .single();
+
+      if (txError) {
+        throw new AppError('Failed to log payment', 500);
+      }
+
+      // Create recurring schedule if frequency is set
+      let scheduleId: string | undefined;
+      console.log('[DebtPayment] recurring_frequency:', recurring_frequency);
+      if (recurring_frequency) {
+        // Calculate next run date based on frequency
+        const nextDate = new Date(flowDate);
+        switch (recurring_frequency) {
+          case 'weekly':
+            nextDate.setDate(nextDate.getDate() + 7);
+            break;
+          case 'biweekly':
+            nextDate.setDate(nextDate.getDate() + 14);
+            break;
+          case 'monthly':
+            nextDate.setMonth(nextDate.getMonth() + 1);
+            break;
+          case 'quarterly':
+            nextDate.setMonth(nextDate.getMonth() + 3);
+            break;
+          case 'yearly':
+            nextDate.setFullYear(nextDate.getFullYear() + 1);
+            break;
+        }
+
+        const { data: schedule, error: scheduleError } = await supabaseAdmin
+          .from('recurring_schedules')
+          .insert({
+            ...ownershipValues,
+            source_transaction_id: transaction.id,
+            frequency: recurring_frequency,
+            next_run_date: nextDate.toISOString().split('T')[0],
+            is_active: true,
+            transaction_template: {
+              type: 'debt_payment',
+              amount: amount,
+              currency: currency,
+              from_asset_id: from_asset_id || null,
+              to_asset_id: null,
+              debt_id: debt_id,
+              category: 'pay_debt',
+              description: description || `Payment to ${debt.name}`,
+              expense_category_id: null,
+              metadata: metadata || null,
+            },
+          })
+          .select()
+          .single();
+
+        if (scheduleError) {
+          console.error('[DebtPayment] Failed to create recurring schedule:', scheduleError);
+          console.error('[DebtPayment] Schedule data was:', {
+            ...ownershipValues,
+            frequency: recurring_frequency,
+            next_run_date: nextDate.toISOString().split('T')[0],
+          });
+          // Don't fail the whole request, just log the error
+        } else {
+          console.log('[DebtPayment] Created recurring schedule:', schedule?.id);
+          scheduleId = schedule?.id;
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        data: {
+          transaction_id: transaction.id,
+          debt: updatedDebt,
+          from_asset: fromAsset,
+          schedule_id: scheduleId,
+        },
+      });
+    }
+  } catch (err) {
+    console.error('Debt transaction error:', err);
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ success: false, error: err.message });
+      return;
+    }
+    res.status(500).json({ success: false, error: 'Failed to process debt transaction' });
   }
 };
 
