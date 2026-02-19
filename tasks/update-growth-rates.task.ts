@@ -1,8 +1,8 @@
 /**
  * Update Growth Rates Task
  *
- * Fetches historical stock data from Yahoo Finance and calculates
- * 5-year and 10-year annualized growth rates (CAGR) for all assets with tickers.
+ * Fetches CAGR (5-year and 10-year growth rates) from findata service
+ * for all assets with tickers.
  *
  * The growth rates are stored in the asset's metadata.growth_rates field:
  * {
@@ -13,32 +13,15 @@
  *   }
  * }
  *
+ * Data source: firewise-findata service (yfinance)
  * Run: npm run task:update-growth-rates
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import * as findata from '../src/utils/findata-client';
 
 dotenv.config();
-
-interface YahooChartResponse {
-  chart: {
-    result: Array<{
-      meta: {
-        regularMarketPrice: number;
-        currency: string;
-        symbol: string;
-      };
-      timestamp: number[];
-      indicators: {
-        adjclose: Array<{
-          adjclose: number[];
-        }>;
-      };
-    }>;
-    error: null | { code: string; description: string };
-  };
-}
 
 interface GrowthRates {
   '5y': number | null;
@@ -96,37 +79,42 @@ export class UpdateGrowthRatesTask {
 
     console.log(`Unique tickers: ${tickerMap.size}`);
 
-    // 3. Fetch growth rates for each ticker
-    let successCount = 0;
-    let errorCount = 0;
+    // 3. Fetch growth rates using batch API
+    const tickers = Array.from(tickerMap.keys());
+    console.log('Fetching CAGR data from findata...');
 
-    for (const [ticker, assetList] of tickerMap) {
-      console.log(`  Fetching ${ticker}...`);
+    try {
+      const cagrData = await findata.fetchCAGRBatch(tickers);
 
-      try {
-        const growthRates = await this.fetchGrowthRates(ticker);
+      let successCount = 0;
+      let errorCount = 0;
 
-        if (growthRates) {
+      for (const [ticker, assetList] of tickerMap) {
+        const data = cagrData[ticker];
+
+        if (data && (data.cagr_5y !== null || data.cagr_10y !== null)) {
+          const growthRates: GrowthRates = {
+            '5y': data.cagr_5y,
+            '10y': data.cagr_10y,
+            updated_at: new Date().toISOString(),
+          };
+
           // Update all assets with this ticker
           for (const asset of assetList) {
             await this.updateAssetGrowthRates(asset, growthRates);
           }
-          console.log(`    ✓ ${ticker}: 5y=${this.formatRate(growthRates['5y'])}, 10y=${this.formatRate(growthRates['10y'])}`);
+          console.log(`  ✓ ${ticker}: 5y=${this.formatRate(growthRates['5y'])}, 10y=${this.formatRate(growthRates['10y'])}`);
           successCount++;
         } else {
-          console.log(`    ✗ ${ticker}: No data available`);
+          console.log(`  ✗ ${ticker}: No data available`);
           errorCount++;
         }
-      } catch (error) {
-        console.log(`    ✗ ${ticker}: ${error}`);
-        errorCount++;
       }
 
-      // Small delay to avoid rate limiting
-      await this.delay(200);
+      console.log(`\nCompleted: ${successCount} success, ${errorCount} errors`);
+    } catch (error) {
+      console.error('Failed to fetch CAGR data:', error);
     }
-
-    console.log(`\nCompleted: ${successCount} success, ${errorCount} errors`);
   }
 
   private formatRate(rate: number | null): string {
@@ -148,69 +136,6 @@ export class UpdateGrowthRatesTask {
     return data || [];
   }
 
-  private async fetchGrowthRates(ticker: string): Promise<GrowthRates | null> {
-    const now = Math.floor(Date.now() / 1000);
-    const fiveYearsAgo = now - 5 * 365 * 24 * 60 * 60;
-    const tenYearsAgo = now - 10 * 365 * 24 * 60 * 60;
-
-    // Fetch 10 years of data (covers both 5y and 10y)
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${tenYearsAgo}&period2=${now}&interval=1mo&includePrePost=false&lang=en-US&region=US`;
-
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as YahooChartResponse;
-
-    if (data.chart.error || !data.chart.result?.[0]) {
-      return null;
-    }
-
-    const result = data.chart.result[0];
-    const timestamps = result.timestamp;
-    const prices = result.indicators?.adjclose?.[0]?.adjclose;
-
-    if (!timestamps || !prices || timestamps.length < 2) {
-      return null;
-    }
-
-    // Calculate growth rates
-    const currentPrice = prices[prices.length - 1];
-
-    // Find 5-year price
-    let fiveYearRate: number | null = null;
-    const fiveYearIndex = timestamps.findIndex(t => t >= fiveYearsAgo);
-    if (fiveYearIndex >= 0 && prices[fiveYearIndex]) {
-      const fiveYearPrice = prices[fiveYearIndex];
-      const years = (timestamps[timestamps.length - 1] - timestamps[fiveYearIndex]) / (365 * 24 * 60 * 60);
-      if (years >= 1 && fiveYearPrice > 0) {
-        fiveYearRate = Math.pow(currentPrice / fiveYearPrice, 1 / years) - 1;
-      }
-    }
-
-    // Find 10-year price
-    let tenYearRate: number | null = null;
-    if (timestamps[0] <= tenYearsAgo + 365 * 24 * 60 * 60 && prices[0]) {
-      const tenYearPrice = prices[0];
-      const years = (timestamps[timestamps.length - 1] - timestamps[0]) / (365 * 24 * 60 * 60);
-      if (years >= 1 && tenYearPrice > 0) {
-        tenYearRate = Math.pow(currentPrice / tenYearPrice, 1 / years) - 1;
-      }
-    }
-
-    return {
-      '5y': fiveYearRate !== null ? Math.round(fiveYearRate * 10000) / 10000 : null,
-      '10y': tenYearRate !== null ? Math.round(tenYearRate * 10000) / 10000 : null,
-      updated_at: new Date().toISOString(),
-    };
-  }
-
   private async updateAssetGrowthRates(asset: Asset, growthRates: GrowthRates): Promise<void> {
     const { error } = await this.supabase
       .from('assets')
@@ -220,9 +145,5 @@ export class UpdateGrowthRatesTask {
     if (error) {
       throw new Error(`Failed to update asset ${asset.id}: ${error.message}`);
     }
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }

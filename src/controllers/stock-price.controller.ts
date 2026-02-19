@@ -1,18 +1,5 @@
 import { Request, Response } from 'express';
-
-interface YahooChartResponse {
-  chart: {
-    result: Array<{
-      meta: {
-        regularMarketPrice: number;
-        previousClose: number;
-        currency: string;
-        symbol: string;
-      };
-    }>;
-    error: null | { code: string; description: string };
-  };
-}
+import * as findata from '../utils/findata-client';
 
 interface StockPrice {
   symbol: string;
@@ -22,10 +9,6 @@ interface StockPrice {
   changePercent: number | null;
   currency: string;
 }
-
-// Cache for stock prices (5 minute TTL)
-const priceCache = new Map<string, { data: StockPrice; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Get real-time stock prices for multiple symbols
@@ -61,34 +44,22 @@ export const getStockPrices = async (req: Request, res: Response) => {
       });
     }
 
-    const now = Date.now();
+    // Fetch prices from findata service
+    const priceData = await findata.fetchStockPrices(symbolList);
+
+    // Convert to expected format
     const results: Record<string, StockPrice> = {};
-    const symbolsToFetch: string[] = [];
-
-    // Check cache first
-    for (const symbol of symbolList) {
-      const cached = priceCache.get(symbol);
-      if (cached && now - cached.timestamp < CACHE_TTL) {
-        results[symbol] = cached.data;
-      } else {
-        symbolsToFetch.push(symbol);
+    for (const [symbol, data] of Object.entries(priceData)) {
+      if (data.price !== null) {
+        results[symbol] = {
+          symbol,
+          price: data.price,
+          previousClose: data.previous_close,
+          change: data.change,
+          changePercent: data.change_percent,
+          currency: data.currency,
+        };
       }
-    }
-
-    // Fetch prices for symbols not in cache
-    if (symbolsToFetch.length > 0) {
-      const fetchPromises = symbolsToFetch.map((symbol) =>
-        fetchStockPrice(symbol)
-      );
-      const fetchedPrices = await Promise.allSettled(fetchPromises);
-
-      fetchedPrices.forEach((result, index) => {
-        const symbol = symbolsToFetch[index];
-        if (result.status === 'fulfilled' && result.value) {
-          results[symbol] = result.value;
-          priceCache.set(symbol, { data: result.value, timestamp: now });
-        }
-      });
     }
 
     return res.json({
@@ -103,51 +74,3 @@ export const getStockPrices = async (req: Request, res: Response) => {
     });
   }
 };
-
-async function fetchStockPrice(symbol: string): Promise<StockPrice | null> {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    const oneDayAgo = now - 86400;
-
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${oneDayAgo}&period2=${now}&interval=1d&includePrePost=false&events=div%7Csplit&lang=en-US&region=US`;
-
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      },
-    });
-
-    if (!response.ok) {
-      console.error(`Yahoo Finance API error for ${symbol}: ${response.status}`);
-      return null;
-    }
-
-    const data = (await response.json()) as YahooChartResponse;
-
-    if (data.chart.error || !data.chart.result?.[0]) {
-      console.error(`No data for symbol ${symbol}`);
-      return null;
-    }
-
-    const meta = data.chart.result[0].meta;
-    const price = meta.regularMarketPrice;
-    const previousClose = meta.previousClose;
-
-    // Calculate change only if previousClose is available
-    const change = previousClose ? price - previousClose : null;
-    const changePercent = previousClose ? ((price - previousClose) / previousClose) * 100 : null;
-
-    return {
-      symbol,
-      price,
-      previousClose: previousClose || null,
-      change,
-      changePercent,
-      currency: meta.currency || 'USD',
-    };
-  } catch (error) {
-    console.error(`Error fetching price for ${symbol}:`, error);
-    return null;
-  }
-}

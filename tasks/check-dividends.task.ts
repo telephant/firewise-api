@@ -6,7 +6,7 @@
  *
  * Logic:
  * 1. Get all users with US stock/ETF holdings (type='stock' or 'etf', market='US')
- * 2. For each stock, fetch dividend data from Yahoo Finance API
+ * 2. For each stock, fetch dividend data from findata service (via yfinance)
  * 3. Check if today is a payment date for any dividend
  * 4. For each matching dividend:
  *    - Check for duplicates (same source_asset_id + date + category='dividend')
@@ -15,13 +15,13 @@
  *    - Create income transaction with needs_review=true
  *    - Update cash asset balance
  *
- * API: Yahoo Finance (no API key required)
- * https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?events=div
+ * Data source: firewise-findata service (yfinance)
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import { getExchangeRates, convertAmount } from '../src/utils/currency-conversion';
+import * as findata from '../src/utils/findata-client';
 
 dotenv.config();
 
@@ -43,26 +43,9 @@ interface UserTaxSettings {
   us_dividend_withholding_rate: number;
 }
 
-interface YahooDividend {
+interface PaidDividend {
   amount: number;
-  date: number; // Unix timestamp
-}
-
-interface YahooChartResponse {
-  chart: {
-    result: Array<{
-      meta: {
-        symbol: string;
-      };
-      events?: {
-        dividends?: Record<string, YahooDividend>;
-      };
-    }>;
-    error?: {
-      code: string;
-      description: string;
-    };
-  };
+  date: string; // YYYY-MM-DD format
 }
 
 export class CheckDividendsTask {
@@ -131,7 +114,7 @@ export class CheckDividendsTask {
 
         // Process each dividend
         for (const dividend of dividends) {
-          const dividendDate = new Date(dividend.date * 1000).toISOString().split('T')[0];
+          const dividendDate = dividend.date;
           console.log(`    Payment date: ${dividendDate}, Amount: $${dividend.amount.toFixed(4)} per share`);
 
           // Create dividend flows for each user holding this stock
@@ -234,51 +217,38 @@ export class CheckDividendsTask {
   }
 
   /**
-   * Fetch recent dividends from Yahoo Finance
+   * Fetch recent dividends from findata service
    * Returns dividends that have already been paid (payment date <= today)
    * Duplicate check happens later to avoid re-creating existing flows
    */
-  private async fetchPaidDividends(ticker: string, today: string): Promise<YahooDividend[]> {
-    // Look back 30 days to catch any missed dividends
-    const todayDate = new Date(today);
-    const startDate = new Date(todayDate);
-    startDate.setDate(startDate.getDate() - 30);
-    const endDate = new Date(todayDate);
-    endDate.setDate(endDate.getDate() + 1);
-
-    const period1 = Math.floor(startDate.getTime() / 1000);
-    const period2 = Math.floor(endDate.getTime() / 1000);
-
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?events=div&interval=1d&period1=${period1}&period2=${period2}`;
-
+  private async fetchPaidDividends(ticker: string, today: string): Promise<PaidDividend[]> {
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; Firewise/1.0)',
-        },
-      });
+      // Fetch dividend data for current year from findata
+      const currentYear = new Date().getFullYear();
+      const dividendData = await findata.fetchDividends(ticker, currentYear);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = (await response.json()) as YahooChartResponse;
-
-      if (data.chart.error) {
-        throw new Error(data.chart.error.description);
-      }
-
-      const events = data.chart.result?.[0]?.events;
-      if (!events?.dividends) {
+      if (!dividendData || !dividendData.has_dividends) {
         return [];
       }
 
-      // Return all dividends with payment date <= today
-      const paidDividends: YahooDividend[] = [];
-      for (const dividend of Object.values(events.dividends)) {
-        const dividendDate = new Date(dividend.date * 1000).toISOString().split('T')[0];
-        if (dividendDate <= today) {
-          paidDividends.push(dividend);
+      // Look back 30 days to catch any missed dividends
+      const todayDate = new Date(today);
+      const startDate = new Date(todayDate);
+      startDate.setDate(startDate.getDate() - 30);
+      const startDateStr = startDate.toISOString().split('T')[0];
+
+      // Filter to actual dividends (not forecasted) that are within the date range
+      const paidDividends: PaidDividend[] = [];
+      for (const div of dividendData.dividends) {
+        // Only include actual dividends (not forecasted)
+        if (div.is_forecasted) continue;
+
+        // Check if date is within the last 30 days and <= today
+        if (div.date >= startDateStr && div.date <= today) {
+          paidDividends.push({
+            amount: div.amount,
+            date: div.date,
+          });
         }
       }
 

@@ -1,9 +1,40 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getStockPrices = void 0;
-// Cache for stock prices (5 minute TTL)
-const priceCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const findata = __importStar(require("../utils/findata-client"));
 /**
  * Get real-time stock prices for multiple symbols
  * GET /api/fire/stock-prices?symbols=AAPL,GOOGL,MSFT
@@ -33,30 +64,21 @@ const getStockPrices = async (req, res) => {
                 error: 'Maximum 50 symbols allowed per request',
             });
         }
-        const now = Date.now();
+        // Fetch prices from findata service
+        const priceData = await findata.fetchStockPrices(symbolList);
+        // Convert to expected format
         const results = {};
-        const symbolsToFetch = [];
-        // Check cache first
-        for (const symbol of symbolList) {
-            const cached = priceCache.get(symbol);
-            if (cached && now - cached.timestamp < CACHE_TTL) {
-                results[symbol] = cached.data;
+        for (const [symbol, data] of Object.entries(priceData)) {
+            if (data.price !== null) {
+                results[symbol] = {
+                    symbol,
+                    price: data.price,
+                    previousClose: data.previous_close,
+                    change: data.change,
+                    changePercent: data.change_percent,
+                    currency: data.currency,
+                };
             }
-            else {
-                symbolsToFetch.push(symbol);
-            }
-        }
-        // Fetch prices for symbols not in cache
-        if (symbolsToFetch.length > 0) {
-            const fetchPromises = symbolsToFetch.map((symbol) => fetchStockPrice(symbol));
-            const fetchedPrices = await Promise.allSettled(fetchPromises);
-            fetchedPrices.forEach((result, index) => {
-                const symbol = symbolsToFetch[index];
-                if (result.status === 'fulfilled' && result.value) {
-                    results[symbol] = result.value;
-                    priceCache.set(symbol, { data: result.value, timestamp: now });
-                }
-            });
         }
         return res.json({
             success: true,
@@ -72,43 +94,4 @@ const getStockPrices = async (req, res) => {
     }
 };
 exports.getStockPrices = getStockPrices;
-async function fetchStockPrice(symbol) {
-    try {
-        const now = Math.floor(Date.now() / 1000);
-        const oneDayAgo = now - 86400;
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${oneDayAgo}&period2=${now}&interval=1d&includePrePost=false&events=div%7Csplit&lang=en-US&region=US`;
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            },
-        });
-        if (!response.ok) {
-            console.error(`Yahoo Finance API error for ${symbol}: ${response.status}`);
-            return null;
-        }
-        const data = (await response.json());
-        if (data.chart.error || !data.chart.result?.[0]) {
-            console.error(`No data for symbol ${symbol}`);
-            return null;
-        }
-        const meta = data.chart.result[0].meta;
-        const price = meta.regularMarketPrice;
-        const previousClose = meta.previousClose;
-        // Calculate change only if previousClose is available
-        const change = previousClose ? price - previousClose : null;
-        const changePercent = previousClose ? ((price - previousClose) / previousClose) * 100 : null;
-        return {
-            symbol,
-            price,
-            previousClose: previousClose || null,
-            change,
-            changePercent,
-            currency: meta.currency || 'USD',
-        };
-    }
-    catch (error) {
-        console.error(`Error fetching price for ${symbol}:`, error);
-        return null;
-    }
-}
 //# sourceMappingURL=stock-price.controller.js.map

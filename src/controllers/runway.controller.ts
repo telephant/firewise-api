@@ -220,8 +220,8 @@ async function collectFinancialData(viewContext: ViewContext, preferredCurrency:
   const assets = (assetsResult.data || []) as Asset[];
   const debts = (debtsResult.data || []) as Debt[];
 
-  // Fetch stock prices for stock/ETF assets (uses shared cache)
-  const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+  // Fetch stock prices for stock/ETF/crypto assets (uses shared cache)
+  const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf' || a.type === 'crypto') && a.ticker);
   const tickers = stockAssets.map(a => a.ticker!);
   const priceMap = await fetchStockPrices(tickers);
 
@@ -239,9 +239,10 @@ async function collectFinancialData(viewContext: ViewContext, preferredCurrency:
     let value: number;
     let valueCurrency: string;
 
-    // For stock/ETF: calculate market value = shares × price
-    if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
-      const stockPrice = priceMap.get(asset.ticker);
+    // For stock/ETF/crypto: calculate market value = shares × price
+    if ((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && asset.ticker) {
+      // Use uppercase for lookup since findata returns uppercase keys
+      const stockPrice = priceMap.get(asset.ticker.toUpperCase());
       if (stockPrice) {
         value = Number(asset.balance) * stockPrice.price;
         valueCurrency = stockPrice.currency;

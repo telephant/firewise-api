@@ -1,56 +1,19 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
-import { AuthenticatedRequest, ApiResponse, Asset, Transaction } from '../types';
+import { AuthenticatedRequest, ApiResponse } from '../types';
 import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import * as findata from '../utils/findata-client';
 
 /**
  * Dividend Calendar Controller
  *
  * Returns dividend calendar data with:
  * - Actual dividends from DB
- * - Forecasted dividends based on historical patterns (from DB or Yahoo Finance)
+ * - Forecasted dividends from findata service (via yfinance)
  */
 
 type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
-
-// In-memory cache for Yahoo Finance dividend data (TTL: 24 hours)
-interface CachedDividendData {
-  events: DividendEvent[];
-  cachedAt: number;
-}
-const dividendCache = new Map<string, CachedDividendData>();
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
-
-function getCachedDividends(ticker: string): DividendEvent[] | null {
-  const cached = dividendCache.get(ticker);
-  if (cached && Date.now() - cached.cachedAt < CACHE_TTL) {
-    return cached.events;
-  }
-  return null;
-}
-
-function setCachedDividends(ticker: string, events: DividendEvent[]): void {
-  dividendCache.set(ticker, { events, cachedAt: Date.now() });
-}
-
-interface DividendEvent {
-  date: Date;
-  amount: number; // dividend per share
-}
-
-interface DividendPattern {
-  frequency: ScheduleFrequency | null;
-  paymentMonths: number[]; // 0-11
-  lastDividendPerShare: number;
-  // Average dividend amount per month (for stocks with varying payouts like D05.SI)
-  avgAmountByMonth: Map<number, number>;
-  // Last year's dividend by month (baseline for forecasting)
-  lastYearByMonth: Map<number, number>;
-  // ALL upcoming announced dividends by month (ex-date in future, amounts known)
-  // e.g., D05.SI 2025: { 3: 0.60, 4: 0.75, 7: 0.75, 10: 0.75 }
-  upcomingByMonth: Map<number, number>;
-}
 
 interface MonthDividend {
   ticker: string;
@@ -94,196 +57,16 @@ interface DividendCalendarResponse {
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /**
- * Fetch dividend history from Yahoo Finance API
- * Uses range=5y with interval=1d for comprehensive dividend data including future announcements
+ * Map findata frequency to ScheduleFrequency
  */
-async function fetchYahooDividendHistory(
-  ticker: string,
-  _startDate?: Date,
-  _endDate?: Date
-): Promise<DividendEvent[]> {
-  try {
-    // Use the better API format that returns more complete data including future announcements
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&events=div&range=5y`;
-
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      },
-    });
-
-    if (!response.ok) {
-      console.warn(`Yahoo Finance API returned ${response.status} for ${ticker}`);
-      return [];
-    }
-
-    const data = await response.json() as {
-      chart?: {
-        result?: Array<{
-          events?: {
-            dividends?: Record<string, { amount: number; date: number }>;
-          };
-        }>;
-      };
-    };
-    const dividends = data?.chart?.result?.[0]?.events?.dividends;
-
-    if (!dividends) {
-      return [];
-    }
-
-    return Object.values(dividends).map((d) => ({
-      date: new Date(d.date * 1000),
-      amount: d.amount,
-    }));
-  } catch (error) {
-    console.error(`Failed to fetch dividend history for ${ticker}:`, error);
-    return [];
-  }
-}
-
-/**
- * Detect dividend frequency from historical payment dates
- */
-function detectFrequency(dividendDates: Date[]): ScheduleFrequency | null {
-  if (dividendDates.length < 2) return null;
-
-  const sorted = [...dividendDates].sort((a, b) => a.getTime() - b.getTime());
-
-  const gaps: number[] = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const monthsDiff =
-      (sorted[i].getFullYear() - sorted[i - 1].getFullYear()) * 12 +
-      (sorted[i].getMonth() - sorted[i - 1].getMonth());
-    gaps.push(monthsDiff);
-  }
-
-  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-
-  if (avgGap <= 0.5) return 'weekly';
-  if (avgGap <= 0.75) return 'biweekly';
-  if (avgGap <= 1.5) return 'monthly';
-  if (avgGap <= 4) return 'quarterly';
-  return 'yearly';
-}
-
-/**
- * Get the typical payment months based on historical data
- */
-function getPaymentMonths(dividendDates: Date[], frequency: ScheduleFrequency): number[] {
-  const monthCounts = new Map<number, number>();
-  dividendDates.forEach((d) => {
-    const month = d.getMonth();
-    monthCounts.set(month, (monthCounts.get(month) || 0) + 1);
-  });
-
-  const sorted = [...monthCounts.entries()].sort((a, b) => b[1] - a[1]);
-
-  switch (frequency) {
-    case 'weekly':
-    case 'biweekly':
-    case 'monthly':
-      return [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-    case 'quarterly':
-      return sorted.slice(0, 4).map(([m]) => m);
-    case 'yearly':
-      return sorted.slice(0, 1).map(([m]) => m);
-    default:
-      return sorted.map(([m]) => m);
-  }
-}
-
-/**
- * Analyze dividend data to detect payment pattern
- * Calculates:
- * - Average dividend per month (for stocks with varying payouts like D05.SI)
- * - Last year's dividend per month (baseline for forecasting)
- * - Upcoming announced dividend (ex-date in future)
- *
- * Note: We don't calculate growth rate because dividend rates tend to stay stable
- * (stock prices may grow but dividend per share remains relatively constant)
- */
-function detectDividendPattern(dividendEvents: DividendEvent[], forecastYear?: number): DividendPattern {
-  const emptyPattern: DividendPattern = {
-    frequency: null,
-    paymentMonths: [],
-    lastDividendPerShare: 0,
-    avgAmountByMonth: new Map(),
-    lastYearByMonth: new Map(),
-    upcomingByMonth: new Map(),
+function mapFrequency(freq: string | null): ScheduleFrequency | null {
+  if (!freq) return null;
+  const freqMap: Record<string, ScheduleFrequency> = {
+    monthly: 'monthly',
+    quarterly: 'quarterly',
+    yearly: 'yearly',
   };
-
-  if (dividendEvents.length === 0) {
-    return emptyPattern;
-  }
-
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  // For forecasting, use the year before the forecast year as baseline
-  const targetYear = forecastYear || currentYear;
-  const baselineYear = targetYear - 1;
-
-  // Separate upcoming (future) vs historical dividends
-  // Filter upcoming events to only include those in the forecast year
-  const upcomingEvents = dividendEvents.filter(
-    (e) => e.date > now && e.date.getFullYear() === targetYear
-  );
-  const historicalEvents = dividendEvents.filter((e) => e.date <= now);
-
-  // Store ALL upcoming dividends by month (not just one)
-  // e.g., D05.SI 2025: Apr=0.60, May=0.75, Aug=0.75, Nov=0.75
-  const upcomingByMonth = new Map<number, number>();
-  upcomingEvents.forEach((e) => {
-    upcomingByMonth.set(e.date.getMonth(), e.amount);
-  });
-
-  const dates = historicalEvents.map((e) => e.date);
-  const frequency = detectFrequency(dates);
-  const paymentMonths = frequency ? getPaymentMonths(dates, frequency) : [];
-
-  const sortedByDate = [...historicalEvents].sort((a, b) => b.date.getTime() - a.date.getTime());
-  const lastDividendPerShare = sortedByDate[0]?.amount || 0;
-
-  // Calculate average dividend amount per month
-  const monthAmounts = new Map<number, number[]>();
-  historicalEvents.forEach((e) => {
-    const month = e.date.getMonth();
-    if (!monthAmounts.has(month)) {
-      monthAmounts.set(month, []);
-    }
-    monthAmounts.get(month)!.push(e.amount);
-  });
-
-  const avgAmountByMonth = new Map<number, number>();
-  monthAmounts.forEach((amounts, month) => {
-    const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-    avgAmountByMonth.set(month, avg);
-  });
-
-  // Get baseline year's dividend per month (year before forecast year)
-  // Used as primary source for forecasting unannounced months
-  const lastYearByMonth = new Map<number, number>();
-  historicalEvents
-    .filter((e) => e.date.getFullYear() === baselineYear)
-    .forEach((e) => {
-      lastYearByMonth.set(e.date.getMonth(), e.amount);
-    });
-
-  return {
-    frequency,
-    paymentMonths,
-    lastDividendPerShare,
-    avgAmountByMonth,
-    lastYearByMonth,
-    upcomingByMonth,
-  };
-}
-
-/**
- * Check if we have enough local data to skip Yahoo Finance API
- */
-function hasEnoughLocalData(dividendCount: number): boolean {
-  return dividendCount >= 4;
+  return freqMap[freq.toLowerCase()] || null;
 }
 
 /**
@@ -366,19 +149,7 @@ export const getDividendCalendar = async (
       console.error('Failed to fetch dividends:', dividendsError);
     }
 
-    // 3. Get historical dividends (2 years) for pattern detection
-    let historicalQuery = supabaseAdmin
-      .from('transactions')
-      .select('*')
-      .eq('type', 'income')
-      .eq('category', 'dividend')
-      .gte('date', `${year - 2}-01-01`)
-      .lte('date', `${year}-12-31`);
-    historicalQuery = applyOwnershipFilter(historicalQuery, viewContext);
-
-    const { data: historicalDividends } = await historicalQuery;
-
-    // 4. Collect currencies and get exchange rates
+    // 3. Collect currencies and get exchange rates
     const assetMap = new Map(stockAssets.map((a) => [a.id, a]));
     const currencies = new Set<string>([preferredCurrency.toLowerCase()]);
 
@@ -407,14 +178,29 @@ export const getDividendCalendar = async (
       };
     };
 
-    // 5. Add actual dividends to months
+    // 5. Add actual dividends from DB to months (return GROSS amount, frontend applies tax)
     actualDividends?.forEach((t) => {
       const month = new Date(t.date).getMonth();
       const asset = assetMap.get(t.source_asset_id) || assetMap.get(t.asset_id);
       const ticker = (t.metadata?.ticker as string) || asset?.ticker || 'Unknown';
       const dividendCurrency = t.currency || 'USD';
 
-      const converted = convertToPreferred(t.amount, dividendCurrency);
+      // Calculate GROSS amount from metadata (t.amount is NET after tax)
+      // GROSS = NET + tax_withheld, or = dividend_per_share * share_count
+      let grossAmount = t.amount;
+      const taxWithheld = t.metadata?.tax_withheld as number | undefined;
+      const dividendPerShare = t.metadata?.dividend_per_share as number | undefined;
+      const shareCount = t.metadata?.share_count as number | undefined;
+
+      if (dividendPerShare && shareCount) {
+        // Preferred: calculate from per-share amount
+        grossAmount = dividendPerShare * shareCount;
+      } else if (taxWithheld && taxWithheld > 0) {
+        // Fallback: add back the tax
+        grossAmount = t.amount + taxWithheld;
+      }
+
+      const converted = convertToPreferred(grossAmount, dividendCurrency);
 
       months[month].dividends.push({
         ticker,
@@ -429,119 +215,62 @@ export const getDividendCalendar = async (
       months[month].total += converted.amount;
     });
 
-    // 5. Generate forecasts for each stock (in parallel)
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-
-    // Prepare stocks that need Yahoo data
-    const stocksNeedingYahoo: Array<{ stock: Asset; localDividends: Transaction[] }> = [];
-    const stocksWithLocalData: Array<{ stock: Asset; dividendEvents: DividendEvent[] }> = [];
-
-    for (const stock of stockAssets) {
-      if (!stock.ticker || stock.balance <= 0) continue;
-
-      const localDividends = historicalDividends?.filter(
-        (t) => t.source_asset_id === stock.id || t.asset_id === stock.id
-      ) || [];
-
-      if (hasEnoughLocalData(localDividends.length)) {
-        // Use local DB data
-        const dividendEvents = localDividends.map((t) => ({
-          date: new Date(t.date),
-          amount: (t.metadata?.dividend_per_share as number) || t.amount / (stock.balance || 1),
-        }));
-        stocksWithLocalData.push({ stock, dividendEvents });
-      } else {
-        stocksNeedingYahoo.push({ stock, localDividends });
+    // Track which months already have DB dividends per ticker
+    const receivedMonthsByTicker = new Map<string, Set<number>>();
+    actualDividends?.forEach((t) => {
+      const asset = assetMap.get(t.source_asset_id) || assetMap.get(t.asset_id);
+      const ticker = (t.metadata?.ticker as string) || asset?.ticker;
+      if (ticker) {
+        if (!receivedMonthsByTicker.has(ticker)) {
+          receivedMonthsByTicker.set(ticker, new Set());
+        }
+        receivedMonthsByTicker.get(ticker)!.add(new Date(t.date).getMonth());
       }
-    }
+    });
 
-    // Fetch Yahoo data in parallel for stocks that need it
-    const twoYearsAgo = new Date();
-    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+    // 6. Fetch dividend forecasts from findata for all stocks
+    const tickersWithBalance = stockAssets
+      .filter((s) => s.ticker && s.balance > 0)
+      .map((s) => s.ticker!);
 
-    const yahooResults = await Promise.all(
-      stocksNeedingYahoo.map(async ({ stock }) => {
-        try {
-          // Check cache first
-          const cached = getCachedDividends(stock.ticker!);
-          if (cached) {
-            return { stock, dividendEvents: cached };
-          }
+    if (tickersWithBalance.length > 0) {
+      const dividendData = await findata.fetchDividendsBatch(tickersWithBalance, year);
 
-          // Fetch from Yahoo and cache
-          const dividendEvents = await fetchYahooDividendHistory(stock.ticker!, twoYearsAgo, new Date());
-          setCachedDividends(stock.ticker!, dividendEvents);
-          return { stock, dividendEvents };
-        } catch (error) {
-          console.error(`Failed to fetch Yahoo data for ${stock.ticker}:`, error);
-          return { stock, dividendEvents: [] as DividendEvent[] };
+      // Process findata dividends (both actual and forecasted)
+      for (const stock of stockAssets) {
+        if (!stock.ticker || stock.balance <= 0) continue;
+
+        const tickerData = dividendData[stock.ticker];
+        if (!tickerData || !tickerData.has_dividends) continue;
+
+        const stockCurrency = tickerData.currency || stock.currency || 'USD';
+        const frequency = mapFrequency(tickerData.frequency);
+        const receivedMonths = receivedMonthsByTicker.get(stock.ticker) || new Set();
+
+        // Process each dividend event from findata
+        for (const div of tickerData.dividends) {
+          // Skip if this month already has a DB dividend for this ticker
+          if (receivedMonths.has(div.month)) continue;
+
+          // Only include forecasted dividends from findata
+          // (actual dividends come from DB above)
+          if (!div.is_forecasted) continue;
+
+          const forecastedAmount = div.amount * stock.balance;
+          const converted = convertToPreferred(forecastedAmount, stockCurrency);
+
+          months[div.month].dividends.push({
+            ticker: stock.ticker,
+            assetId: stock.id,
+            amount: converted.amount,
+            originalAmount: shouldConvert ? converted.original : undefined,
+            originalCurrency: shouldConvert ? converted.originalCurrency : undefined,
+            isForecasted: true,
+            frequency,
+            market: stock.market || null,
+          });
+          months[div.month].total += converted.amount;
         }
-      })
-    );
-
-    // Combine all stocks with their dividend data
-    const allStocksWithData = [...stocksWithLocalData, ...yahooResults];
-
-    // Process forecasts
-    for (const { stock, dividendEvents } of allStocksWithData) {
-      const pattern = detectDividendPattern(dividendEvents, year);
-
-      if (!pattern.frequency || pattern.paymentMonths.length === 0) continue;
-
-      // Get months already received this year
-      const receivedMonths = new Set<number>();
-      actualDividends?.forEach((t) => {
-        if (t.source_asset_id === stock.id || t.asset_id === stock.id) {
-          receivedMonths.add(new Date(t.date).getMonth());
-        }
-      });
-
-      // Predict future dividends
-      // Stock currency determines dividend currency (US stocks pay in USD)
-      const stockCurrency = stock.currency || 'USD';
-
-      for (const month of pattern.paymentMonths) {
-        if (receivedMonths.has(month)) continue;
-        if (year === currentYear && month <= currentMonth) continue;
-        if (year < currentYear) continue;
-
-        // Determine dividend per share using this priority:
-        // 1. Upcoming announced dividend for this month (exact amount from API)
-        // 2. Last year same month (historical baseline - dividend rates stay stable)
-        // 3. Average for this month (historical average)
-        // 4. Last dividend (fallback)
-        let dividendPerShare: number;
-
-        const upcomingAmount = pattern.upcomingByMonth.get(month);
-        if (upcomingAmount !== undefined) {
-          // Use exact announced amount from Yahoo Finance
-          dividendPerShare = upcomingAmount;
-        } else {
-          const lastYearAmount = pattern.lastYearByMonth.get(month);
-          if (lastYearAmount && lastYearAmount > 0) {
-            // Use last year's same month directly (dividend rates tend to stay stable)
-            dividendPerShare = lastYearAmount;
-          } else {
-            // Fall back to historical average or last dividend
-            dividendPerShare = pattern.avgAmountByMonth.get(month) ?? pattern.lastDividendPerShare;
-          }
-        }
-
-        const forecastedAmount = dividendPerShare * stock.balance;
-        const converted = convertToPreferred(forecastedAmount, stockCurrency);
-
-        months[month].dividends.push({
-          ticker: stock.ticker!,
-          assetId: stock.id,
-          amount: converted.amount,
-          originalAmount: shouldConvert ? converted.original : undefined,
-          originalCurrency: shouldConvert ? converted.originalCurrency : undefined,
-          isForecasted: true,
-          frequency: pattern.frequency,
-          market: stock.market || null,
-        });
-        months[month].total += converted.amount;
       }
     }
 
@@ -565,7 +294,7 @@ export const getDividendCalendar = async (
         debug: {
           stockCount: stockAssets?.length || 0,
           dividendCount: actualDividends?.length || 0,
-          historicalCount: historicalDividends?.length || 0,
+          historicalCount: 0, // No longer used - findata handles pattern detection
         },
       },
     });

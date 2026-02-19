@@ -45,19 +45,11 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
             .filter((s) => !!s))];
     // Combine all symbols to fetch
     const allSymbols = [...tickers, ...metalSymbols];
-    // Fetch all prices in parallel
-    const pricePromises = allSymbols.map(symbol => (0, stock_price_1.fetchStockPrice)(symbol));
-    const priceResults = await Promise.all(pricePromises);
-    // Create price map
-    const priceMap = new Map();
-    allSymbols.forEach((symbol, index) => {
-        if (priceResults[index]) {
-            priceMap.set(symbol, priceResults[index]);
-        }
-    });
+    // Fetch all prices in batch
+    const priceMap = await (0, stock_price_1.fetchStockPrices)(allSymbols);
     // Collect all currencies for exchange rate conversion
     const currencies = new Set([preferredCurrency.toLowerCase()]);
-    priceResults.forEach(result => {
+    priceMap.forEach(result => {
         if (result)
             currencies.add(result.currency.toLowerCase());
     });
@@ -71,7 +63,8 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
     return assets.map(asset => {
         // Handle stocks/ETFs/crypto (all have tickers and balance = shares/units)
         if ((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && asset.ticker) {
-            const stockPrice = priceMap.get(asset.ticker);
+            // Use uppercase for lookup since findata returns uppercase keys
+            const stockPrice = priceMap.get(asset.ticker.toUpperCase());
             if (stockPrice) {
                 // Calculate market value in asset's currency
                 const marketValue = asset.balance * stockPrice.price;
@@ -243,10 +236,10 @@ const getAsset = async (req, res) => {
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Add stock price and convert to preferred currency for stock/ETF assets
         const [assetWithStockPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
-        // Add currency conversion fields (skip for stocks/metals - already handled above)
+        // Add currency conversion fields (skip for stocks/crypto/metals - already handled above)
         const assetWithConversion = await (0, currency_conversion_1.addConvertedFieldsToSingle)({
             ...assetWithStockPrice,
-            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf') && assetWithStockPrice.stock_price) ||
+            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && assetWithStockPrice.stock_price) ||
                 (asset.type === 'metals' && assetWithStockPrice.converted_balance !== undefined)) ? true : undefined,
         }, userId);
         res.json({
@@ -385,10 +378,10 @@ const updateAsset = async (req, res) => {
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Add stock/metal price and convert to preferred currency
         const [assetWithPrice] = await addStockPricesAndConversion([asset], preferredCurrency);
-        // Add currency conversion fields (skip for stocks/metals - already handled above)
+        // Add currency conversion fields (skip for stocks/crypto/metals - already handled above)
         const assetWithConversion = await (0, currency_conversion_1.addConvertedFieldsToSingle)({
             ...assetWithPrice,
-            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf') && assetWithPrice.stock_price) ||
+            skip_balance_conversion: (((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && assetWithPrice.stock_price) ||
                 (asset.type === 'metals' && assetWithPrice.converted_balance !== undefined)) ? true : undefined,
         }, userId);
         res.json({ success: true, data: assetWithConversion });
@@ -526,29 +519,22 @@ const getNetWorthStats = async (req, res) => {
         }
         const assets = assetsResult.data || [];
         const debts = debtsResult.data || [];
-        // Find stock/ETF assets and fetch prices
-        const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+        // Find stock/ETF/crypto assets and fetch prices
+        const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf' || a.type === 'crypto') && a.ticker);
         const tickers = [...new Set(stockAssets.map(a => a.ticker))];
         // Find metal assets and get their Yahoo symbols
         const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
         const metalSymbols = [...new Set(metalAssets
                 .map(a => METAL_CONFIG[a.metadata?.metal_type]?.symbol)
                 .filter((s) => !!s))];
-        // Fetch all prices (stocks + metals)
+        // Fetch all prices (stocks + metals) in batch
         const allSymbols = [...tickers, ...metalSymbols];
-        const pricePromises = allSymbols.map(symbol => (0, stock_price_1.fetchStockPrice)(symbol));
-        const priceResults = await Promise.all(pricePromises);
-        const priceMap = new Map();
-        allSymbols.forEach((symbol, index) => {
-            if (priceResults[index]) {
-                priceMap.set(symbol, priceResults[index]);
-            }
-        });
+        const priceMap = await (0, stock_price_1.fetchStockPrices)(allSymbols);
         // Collect all currencies for exchange rates
         const currencies = new Set([preferredCurrency.toLowerCase()]);
         assets.forEach(a => currencies.add((a.currency || 'USD').toLowerCase()));
         debts.forEach(d => currencies.add((d.currency || 'USD').toLowerCase()));
-        priceResults.forEach(result => {
+        priceMap.forEach(result => {
             if (result)
                 currencies.add(result.currency.toLowerCase());
         });
@@ -558,8 +544,9 @@ const getNetWorthStats = async (req, res) => {
         for (const asset of assets) {
             let value;
             let valueCurrency;
-            if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
-                const price = priceMap.get(asset.ticker);
+            if ((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && asset.ticker) {
+                // Use uppercase for lookup since findata returns uppercase keys
+                const price = priceMap.get(asset.ticker.toUpperCase());
                 if (price) {
                     value = asset.balance * price.price;
                     valueCurrency = price.currency;

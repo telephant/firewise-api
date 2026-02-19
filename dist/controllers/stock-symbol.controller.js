@@ -1,84 +1,53 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.searchSymbols = void 0;
-// Map Yahoo quoteType to our type
-function mapQuoteType(yahooType) {
-    const type = yahooType?.toUpperCase();
-    switch (type) {
-        case 'EQUITY':
-            return 'stock';
-        case 'ETF':
-            return 'etf';
-        case 'FUTURE':
-            return 'future';
-        case 'CRYPTOCURRENCY':
-            return 'crypto';
-        case 'INDEX':
-            return 'index';
-        case 'CURRENCY':
-            return 'currency';
-        default:
-            return 'other';
-    }
-}
-// Map single type to Yahoo quotesTypes param
-function mapSingleTypeToYahoo(type) {
-    switch (type) {
-        case 'stock':
-            return 'EQUITY';
-        case 'etf':
-            return 'ETF';
-        case 'future':
-            return 'FUTURE';
-        case 'crypto':
-            return 'CRYPTOCURRENCY';
-        case 'index':
-            return 'INDEX';
-        case 'currency':
-            return 'CURRENCY';
-        default:
-            return undefined;
-    }
-}
-// Map our type(s) to Yahoo quotesTypes param - supports comma-separated types
-function mapToYahooQuotesTypes(types) {
-    if (!types || types === 'all')
-        return undefined;
-    // Handle comma-separated types (e.g., "stock,etf")
-    const typeList = types.split(',').map((t) => t.trim());
-    const yahooTypes = typeList
-        .map((t) => mapSingleTypeToYahoo(t))
-        .filter((t) => t !== undefined);
-    return yahooTypes.length > 0 ? yahooTypes.join(',') : undefined;
-}
-// Map region to allowed exchange codes
-// Yahoo's region param is for locale, not filtering - we filter by exchange
-const REGION_EXCHANGES = {
-    US: ['NMS', 'NYQ', 'PCX', 'NGM', 'NCM', 'BTS', 'ASE'], // NASDAQ, NYSE, NYSE Arca, etc.
-    SG: ['SES'], // Singapore Exchange
-    HK: ['HKG'], // Hong Kong Stock Exchange
-    UK: ['LSE', 'IOB'], // London Stock Exchange
-    JP: ['TYO', 'JPX'], // Tokyo Stock Exchange
-    CN: ['SHH', 'SHZ'], // Shanghai, Shenzhen
-    // Add more as needed
-};
-function getExchangesForRegion(region) {
-    return REGION_EXCHANGES[region.toUpperCase()];
-}
+const findata = __importStar(require("../utils/findata-client"));
 /**
- * Search symbols using Yahoo Finance
+ * Search symbols using findata service
  * GET /api/symbols/ticker-search?q=AAPL&region=US&type=stock,etf&limit=10
  *
  * Query params:
  *   - q: Search query (required, min 1 char)
- *   - region: Market region ('US', 'HK', 'UK', etc., default 'US')
- *   - type: Filter by type(s), comma-separated ('stock', 'etf', 'future', 'crypto', 'index', 'currency', 'all')
- *           Example: type=stock,etf for stocks and ETFs
+ *   - region: Market region ('US', 'HK', 'UK', 'SG', 'JP', 'CN', etc.)
+ *   - type: Filter by type ('stock', 'etf', 'future', 'crypto', 'index', 'currency', 'fund')
  *   - limit: Max results (default 10, max 20)
  */
 const searchSymbols = async (req, res) => {
     try {
-        const { q = '', region = 'US', type = 'all', limit = '10' } = req.query;
+        const { q = '', region, type, limit = '10' } = req.query;
         const searchTerm = q.trim();
         if (!searchTerm) {
             res.json({
@@ -88,62 +57,39 @@ const searchSymbols = async (req, res) => {
             return;
         }
         const maxResults = Math.min(parseInt(limit, 10) || 10, 20);
-        const quotesTypes = mapToYahooQuotesTypes(type);
-        // Build Yahoo Finance search URL
-        const params = new URLSearchParams({
-            q: searchTerm,
-            lang: 'en-US',
-            region: region.toUpperCase(),
-            quotesCount: String(maxResults * 3 + 10), // Request extra to account for region/type filtering
-            newsCount: '0',
-            listsCount: '0',
-            enableFuzzyQuery: 'false',
-            quotesQueryId: 'tss_match_phrase_query',
-            enableLogoUrl: 'true',
-        });
-        // Add quotesTypes if filtering by type
-        if (quotesTypes) {
-            params.set('quotesTypes', quotesTypes);
-        }
-        const yahooUrl = `https://query1.finance.yahoo.com/v1/finance/search?${params.toString()}`;
-        const response = await fetch(yahooUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            },
-        });
-        if (!response.ok) {
-            throw new Error(`Yahoo Finance API returned ${response.status}`);
-        }
-        const data = (await response.json());
-        // Transform results
-        let results = (data.quotes || [])
-            .filter((quote) => quote.isYahooFinance)
-            .map((quote) => ({
-            symbol: quote.symbol,
-            name: quote.shortname || quote.longname || quote.symbol,
-            longName: quote.longname,
-            type: mapQuoteType(quote.quoteType),
-            exchange: quote.exchange,
-            exchangeDisplay: quote.exchDisp || quote.exchange,
-            sector: quote.sector,
-            industry: quote.industry,
-            logoUrl: quote.logoUrl,
-        }));
-        // Filter by region's exchanges
-        const allowedExchanges = getExchangesForRegion(region);
-        if (allowedExchanges) {
-            results = results.filter((r) => allowedExchanges.includes(r.exchange));
-        }
-        // Additional client-side filtering if types specified (handles comma-separated)
+        // Handle comma-separated types - use first one for findata API
+        let searchType;
         if (type && type !== 'all') {
+            const types = type.split(',').map((t) => t.trim());
+            searchType = types[0]; // Use first type for API call
+        }
+        // Fetch from findata service
+        const results = await findata.searchSymbols(searchTerm, {
+            region: region,
+            type: searchType,
+            limit: maxResults * 2, // Request extra for client-side filtering
+        });
+        // Transform to expected format
+        let symbols = results.map((r) => ({
+            symbol: r.symbol,
+            name: r.short_name || r.long_name || r.symbol,
+            longName: r.long_name || undefined,
+            type: r.quote_type || 'other',
+            exchange: r.exchange || '',
+            exchangeDisplay: r.exchange_display || r.exchange || '',
+            sector: r.sector || undefined,
+            industry: r.industry || undefined,
+        }));
+        // Additional client-side filtering if multiple types specified
+        if (type && type !== 'all' && type.includes(',')) {
             const allowedTypes = new Set(type.split(',').map((t) => t.trim()));
-            results = results.filter((r) => allowedTypes.has(r.type));
+            symbols = symbols.filter((s) => allowedTypes.has(s.type));
         }
         // Limit results
-        results = results.slice(0, maxResults);
+        symbols = symbols.slice(0, maxResults);
         res.json({
             success: true,
-            data: { symbols: results, total: results.length },
+            data: { symbols, total: symbols.length },
         });
     }
     catch (error) {
