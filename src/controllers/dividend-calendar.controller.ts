@@ -43,6 +43,13 @@ interface DividendPattern {
   frequency: ScheduleFrequency | null;
   paymentMonths: number[]; // 0-11
   lastDividendPerShare: number;
+  // Average dividend amount per month (for stocks with varying payouts like D05.SI)
+  avgAmountByMonth: Map<number, number>;
+  // Last year's dividend by month (baseline for forecasting)
+  lastYearByMonth: Map<number, number>;
+  // ALL upcoming announced dividends by month (ex-date in future, amounts known)
+  // e.g., D05.SI 2025: { 3: 0.60, 4: 0.75, 7: 0.75, 10: 0.75 }
+  upcomingByMonth: Map<number, number>;
 }
 
 interface MonthDividend {
@@ -88,17 +95,16 @@ const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 
 /**
  * Fetch dividend history from Yahoo Finance API
+ * Uses range=5y with interval=1d for comprehensive dividend data including future announcements
  */
 async function fetchYahooDividendHistory(
   ticker: string,
-  startDate: Date,
-  endDate: Date
+  _startDate?: Date,
+  _endDate?: Date
 ): Promise<DividendEvent[]> {
-  const period1 = Math.floor(startDate.getTime() / 1000);
-  const period2 = Math.floor(endDate.getTime() / 1000);
-
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?events=div&period1=${period1}&period2=${period2}&interval=1mo`;
+    // Use the better API format that returns more complete data including future announcements
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&events=div&range=5y`;
 
     const response = await fetch(url, {
       headers: {
@@ -189,20 +195,88 @@ function getPaymentMonths(dividendDates: Date[], frequency: ScheduleFrequency): 
 
 /**
  * Analyze dividend data to detect payment pattern
+ * Calculates:
+ * - Average dividend per month (for stocks with varying payouts like D05.SI)
+ * - Last year's dividend per month (baseline for forecasting)
+ * - Upcoming announced dividend (ex-date in future)
+ *
+ * Note: We don't calculate growth rate because dividend rates tend to stay stable
+ * (stock prices may grow but dividend per share remains relatively constant)
  */
-function detectDividendPattern(dividendEvents: DividendEvent[]): DividendPattern {
+function detectDividendPattern(dividendEvents: DividendEvent[], forecastYear?: number): DividendPattern {
+  const emptyPattern: DividendPattern = {
+    frequency: null,
+    paymentMonths: [],
+    lastDividendPerShare: 0,
+    avgAmountByMonth: new Map(),
+    lastYearByMonth: new Map(),
+    upcomingByMonth: new Map(),
+  };
+
   if (dividendEvents.length === 0) {
-    return { frequency: null, paymentMonths: [], lastDividendPerShare: 0 };
+    return emptyPattern;
   }
 
-  const dates = dividendEvents.map((e) => e.date);
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  // For forecasting, use the year before the forecast year as baseline
+  const targetYear = forecastYear || currentYear;
+  const baselineYear = targetYear - 1;
+
+  // Separate upcoming (future) vs historical dividends
+  // Filter upcoming events to only include those in the forecast year
+  const upcomingEvents = dividendEvents.filter(
+    (e) => e.date > now && e.date.getFullYear() === targetYear
+  );
+  const historicalEvents = dividendEvents.filter((e) => e.date <= now);
+
+  // Store ALL upcoming dividends by month (not just one)
+  // e.g., D05.SI 2025: Apr=0.60, May=0.75, Aug=0.75, Nov=0.75
+  const upcomingByMonth = new Map<number, number>();
+  upcomingEvents.forEach((e) => {
+    upcomingByMonth.set(e.date.getMonth(), e.amount);
+  });
+
+  const dates = historicalEvents.map((e) => e.date);
   const frequency = detectFrequency(dates);
   const paymentMonths = frequency ? getPaymentMonths(dates, frequency) : [];
 
-  const sortedByDate = [...dividendEvents].sort((a, b) => b.date.getTime() - a.date.getTime());
+  const sortedByDate = [...historicalEvents].sort((a, b) => b.date.getTime() - a.date.getTime());
   const lastDividendPerShare = sortedByDate[0]?.amount || 0;
 
-  return { frequency, paymentMonths, lastDividendPerShare };
+  // Calculate average dividend amount per month
+  const monthAmounts = new Map<number, number[]>();
+  historicalEvents.forEach((e) => {
+    const month = e.date.getMonth();
+    if (!monthAmounts.has(month)) {
+      monthAmounts.set(month, []);
+    }
+    monthAmounts.get(month)!.push(e.amount);
+  });
+
+  const avgAmountByMonth = new Map<number, number>();
+  monthAmounts.forEach((amounts, month) => {
+    const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+    avgAmountByMonth.set(month, avg);
+  });
+
+  // Get baseline year's dividend per month (year before forecast year)
+  // Used as primary source for forecasting unannounced months
+  const lastYearByMonth = new Map<number, number>();
+  historicalEvents
+    .filter((e) => e.date.getFullYear() === baselineYear)
+    .forEach((e) => {
+      lastYearByMonth.set(e.date.getMonth(), e.amount);
+    });
+
+  return {
+    frequency,
+    paymentMonths,
+    lastDividendPerShare,
+    avgAmountByMonth,
+    lastYearByMonth,
+    upcomingByMonth,
+  };
 }
 
 /**
@@ -411,7 +485,7 @@ export const getDividendCalendar = async (
 
     // Process forecasts
     for (const { stock, dividendEvents } of allStocksWithData) {
-      const pattern = detectDividendPattern(dividendEvents);
+      const pattern = detectDividendPattern(dividendEvents, year);
 
       if (!pattern.frequency || pattern.paymentMonths.length === 0) continue;
 
@@ -432,8 +506,29 @@ export const getDividendCalendar = async (
         if (year === currentYear && month <= currentMonth) continue;
         if (year < currentYear) continue;
 
-        // Always return gross amounts - tax calculation done on frontend
-        const forecastedAmount = pattern.lastDividendPerShare * stock.balance;
+        // Determine dividend per share using this priority:
+        // 1. Upcoming announced dividend for this month (exact amount from API)
+        // 2. Last year same month (historical baseline - dividend rates stay stable)
+        // 3. Average for this month (historical average)
+        // 4. Last dividend (fallback)
+        let dividendPerShare: number;
+
+        const upcomingAmount = pattern.upcomingByMonth.get(month);
+        if (upcomingAmount !== undefined) {
+          // Use exact announced amount from Yahoo Finance
+          dividendPerShare = upcomingAmount;
+        } else {
+          const lastYearAmount = pattern.lastYearByMonth.get(month);
+          if (lastYearAmount && lastYearAmount > 0) {
+            // Use last year's same month directly (dividend rates tend to stay stable)
+            dividendPerShare = lastYearAmount;
+          } else {
+            // Fall back to historical average or last dividend
+            dividendPerShare = pattern.avgAmountByMonth.get(month) ?? pattern.lastDividendPerShare;
+          }
+        }
+
+        const forecastedAmount = dividendPerShare * stock.balance;
         const converted = convertToPreferred(forecastedAmount, stockCurrency);
 
         months[month].dividends.push({

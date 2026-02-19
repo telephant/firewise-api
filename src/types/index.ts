@@ -232,6 +232,7 @@ export interface TransactionStats {
 
 export interface AssetFilters extends PaginationParams {
   type?: AssetType;
+  search?: string; // Search by name or ticker
 }
 
 // Expense Category (FIRE-specific, separate from ledger categories)

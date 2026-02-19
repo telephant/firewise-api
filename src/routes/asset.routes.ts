@@ -7,6 +7,7 @@ import {
   updateAsset,
   deleteAsset,
   getNetWorthStats,
+  getAssetTypeStats,
   getDefaultCashAccount,
 } from '../controllers/asset.controller';
 import { createTransaction } from '../controllers/transaction.controller';
@@ -20,6 +21,7 @@ router.use(authMiddleware);
 router.get('/', getAssets);
 router.post('/', createAsset);
 router.get('/stats/net-worth', getNetWorthStats); // Must be before /:id
+router.get('/stats/by-type', getAssetTypeStats); // Must be before /:id
 router.get('/default-cash', getDefaultCashAccount); // Must be before /:id
 
 // Unified asset transaction endpoint (invest, sell, transfer, add)

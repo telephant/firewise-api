@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getNetWorthStats = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getDefaultCashAccount = exports.getAssets = void 0;
+exports.getNetWorthStats = exports.getAssetTypeStats = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAsset = exports.getDefaultCashAccount = exports.getAssets = void 0;
 const supabase_1 = require("../config/supabase");
 const error_1 = require("../middleware/error");
 const currency_conversion_1 = require("../utils/currency-conversion");
@@ -35,8 +35,8 @@ function convertMetalPrice(yahooPrice, fromUnit, toUnit) {
  * Balance remains as shares/weight, but we calculate and convert market_value
  */
 async function addStockPricesAndConversion(assets, preferredCurrency) {
-    // Find all stock/ETF assets with tickers
-    const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf') && a.ticker);
+    // Find all stock/ETF/crypto assets with tickers
+    const stockAssets = assets.filter(a => (a.type === 'stock' || a.type === 'etf' || a.type === 'crypto') && a.ticker);
     const tickers = [...new Set(stockAssets.map(a => a.ticker))];
     // Find all metal assets and get their Yahoo symbols
     const metalAssets = assets.filter(a => a.type === 'metals' && a.metadata?.metal_type);
@@ -69,11 +69,11 @@ async function addStockPricesAndConversion(assets, preferredCurrency) {
     const rateMap = await (0, currency_conversion_1.getExchangeRates)(Array.from(currencies));
     // Add prices, market_value, and converted_balance to assets
     return assets.map(asset => {
-        // Handle stocks/ETFs
-        if ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker) {
+        // Handle stocks/ETFs/crypto (all have tickers and balance = shares/units)
+        if ((asset.type === 'stock' || asset.type === 'etf' || asset.type === 'crypto') && asset.ticker) {
             const stockPrice = priceMap.get(asset.ticker);
             if (stockPrice) {
-                // Calculate market value in stock's currency
+                // Calculate market value in asset's currency
                 const marketValue = asset.balance * stockPrice.price;
                 // Convert to user's preferred currency
                 const conversion = (0, currency_conversion_1.convertAmount)(marketValue, stockPrice.currency, preferredCurrency, rateMap);
@@ -124,7 +124,7 @@ const getAssets = async (req, res) => {
     try {
         const userId = req.user.id;
         const viewContext = await (0, family_context_1.getViewContext)(req);
-        const { page = '1', limit = '50', type, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+        const { page = '1', limit = '50', type, search, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
         const pageNum = parseInt(page, 10) || 1;
         const limitNum = Math.min(parseInt(limit, 10) || 50, 100);
         const offset = (pageNum - 1) * limitNum;
@@ -142,6 +142,11 @@ const getAssets = async (req, res) => {
         if (type) {
             query = query.eq('type', type);
         }
+        // Search by name or ticker (case-insensitive)
+        if (search) {
+            const searchTerm = search.trim().toLowerCase();
+            query = query.or(`name.ilike.%${searchTerm}%,ticker.ilike.%${searchTerm}%`);
+        }
         query = query.range(offset, offset + limitNum - 1);
         const { data: assets, error, count } = await query;
         if (error) {
@@ -150,13 +155,13 @@ const getAssets = async (req, res) => {
         // Get user preferences for currency
         const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
         const preferredCurrency = prefs?.preferred_currency || 'USD';
-        // Add stock prices and convert to preferred currency for stock/ETF assets
+        // Add stock prices and convert to preferred currency for stock/ETF/crypto/metals assets
         const assetsWithStockPrices = await addStockPricesAndConversion(assets || [], preferredCurrency);
-        // Add currency conversion fields for non-stock/non-metal assets
-        // Stock/ETF/Metal assets already have converted_balance from addStockPricesAndConversion
+        // Add currency conversion fields for non-price-fetched assets (cash, deposit, bond, real_estate, other)
+        // Stock/ETF/crypto/metals already have converted_balance from addStockPricesAndConversion
         const assetsWithConversion = await (0, currency_conversion_1.addConvertedFieldsToArray)(assetsWithStockPrices.map(a => {
-            // For stock/ETF/metals: skip balance conversion (already handled above)
-            if (((a.type === 'stock' || a.type === 'etf') && a.stock_price) ||
+            // For stock/ETF/crypto/metals: skip balance conversion (already handled above)
+            if (((a.type === 'stock' || a.type === 'etf' || a.type === 'crypto') && a.stock_price) ||
                 (a.type === 'metals' && a.converted_balance !== undefined)) {
                 return { ...a, skip_balance_conversion: true };
             }
@@ -426,6 +431,71 @@ const deleteAsset = async (req, res) => {
     }
 };
 exports.deleteAsset = deleteAsset;
+/**
+ * Get asset stats grouped by type (for stats row)
+ * Returns total value per type, converted to user's preferred currency
+ * GET /api/fire/assets/type-stats
+ */
+const getAssetTypeStats = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const viewContext = await (0, family_context_1.getViewContext)(req);
+        // Get user preferences for currency
+        const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
+        const preferredCurrency = prefs?.preferred_currency || 'USD';
+        // Build query with family/personal context
+        let query = supabase_1.supabaseAdmin.from('assets').select('*');
+        query = (0, family_context_1.applyOwnershipFilter)(query, viewContext);
+        const { data: assets, error } = await query;
+        if (error) {
+            throw new error_1.AppError('Failed to fetch assets', 500);
+        }
+        // Add stock prices and convert to preferred currency for stock/ETF/crypto/metals
+        const assetsWithStockPrices = await addStockPricesAndConversion(assets || [], preferredCurrency);
+        // Add currency conversion for all other asset types (cash, deposit, bond, real_estate, other)
+        // This mirrors the logic in getAssets
+        const assetsWithConversion = await (0, currency_conversion_1.addConvertedFieldsToArray)(assetsWithStockPrices.map(a => {
+            // For stock/ETF/crypto/metals: skip balance conversion (already handled above)
+            if (((a.type === 'stock' || a.type === 'etf' || a.type === 'crypto') && a.stock_price) ||
+                (a.type === 'metals' && a.converted_balance !== undefined)) {
+                return { ...a, skip_balance_conversion: true };
+            }
+            return a;
+        }), userId);
+        // Group by type and sum values
+        const typeMap = new Map();
+        let grandTotal = 0;
+        for (const asset of assetsWithConversion) {
+            // Use converted_balance (market value in preferred currency) if available
+            const value = asset.converted_balance ?? asset.balance;
+            const existing = typeMap.get(asset.type) || { total: 0, count: 0 };
+            existing.total += value;
+            existing.count += 1;
+            typeMap.set(asset.type, existing);
+            grandTotal += value;
+        }
+        // Convert to array
+        const stats = Array.from(typeMap.entries()).map(([type, data]) => ({
+            type,
+            total: data.total,
+            count: data.count,
+        }));
+        res.json({
+            success: true,
+            data: {
+                stats,
+                grandTotal,
+                currency: preferredCurrency,
+            },
+        });
+    }
+    catch (err) {
+        if (err instanceof error_1.AppError)
+            throw err;
+        res.status(500).json({ success: false, error: 'Failed to fetch asset type stats' });
+    }
+};
+exports.getAssetTypeStats = getAssetTypeStats;
 /**
  * Get net worth statistics (total assets, debts, net worth)
  * All values converted to user's preferred currency
