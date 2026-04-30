@@ -1,26 +1,25 @@
 /**
  * Check Dividends Task
  *
- * Checks for dividend payment dates for US stocks/ETFs held by users and
- * automatically creates income transactions for dividends that are paid.
+ * Checks for dividend payments for all stock/ETF holdings and automatically
+ * creates income transactions for dividends that have been paid.
  *
  * Logic:
- * 1. Get all users with US stock/ETF holdings (type='stock' or 'etf', market='US')
- * 2. For each stock, fetch dividend data from findata service (via yfinance)
- * 3. Check if today is a payment date for any dividend
- * 4. For each matching dividend:
- *    - Check for duplicates (same source_asset_id + date + category='dividend')
- *    - Calculate gross amount: shares × dividend_per_share
- *    - Apply tax withholding and currency conversion
- *    - Create income transaction with needs_review=true
- *    - Update cash asset balance
+ * 1. Get all stock/ETF assets with balance > 0 (all markets)
+ * 2. For each asset:
+ *    - Determine fromDate = max(last recorded dividend date, asset creation date)
+ *    - Fetch all actual paid dividends from fromDate to today (across years)
+ *    - For each new dividend:
+ *      - Calculate gross amount: shares × dividend_per_share
+ *      - Apply tax withholding and currency conversion
+ *      - Create income transaction with needs_review=true
+ *      - Update cash asset balance
  *
  * Data source: firewise-findata service (yfinance)
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
-import { getExchangeRates, convertAmount } from '../src/utils/currency-conversion';
 import * as findata from '../src/utils/findata-client';
 
 dotenv.config();
@@ -33,6 +32,8 @@ interface Asset {
   ticker: string;
   balance: number;
   currency: string;
+  created_at: string;
+  market: string | null;
 }
 
 interface UserAsset extends Asset {
@@ -46,6 +47,7 @@ interface UserTaxSettings {
 interface PaidDividend {
   amount: number;
   date: string; // YYYY-MM-DD format
+  currency: string;
 }
 
 export class CheckDividendsTask {
@@ -78,10 +80,10 @@ export class CheckDividendsTask {
 
     // Get all US stock assets with their user info
     const stockAssets = await this.getUSStockAssets();
-    console.log(`Found ${stockAssets.length} US stock holdings to check`);
+    console.log(`Found ${stockAssets.length} stock holdings to check`);
 
     if (stockAssets.length === 0) {
-      console.log('No US stocks to check for dividends');
+      console.log('No stocks to check for dividends');
       return;
     }
 
@@ -98,93 +100,100 @@ export class CheckDividendsTask {
     console.log(`Checking ${tickerMap.size} unique tickers`);
 
     let dividendsCreated = 0;
-    let duplicatesSkipped = 0;
+    let dividendsUpdated = 0;
 
     // Check each ticker for dividends
     for (const [ticker, assets] of tickerMap) {
       try {
-        // Fetch all paid dividends in the last 30 days
-        const dividends = await this.fetchPaidDividends(ticker, today);
+        // Process each asset individually (each may have a different fromDate)
+        for (const asset of assets) {
+          // Only fetch dividends since asset was purchased
+          const assetCreatedDate = asset.created_at.split('T')[0];
 
-        if (dividends.length === 0) {
-          continue;
-        }
+          // Fetch all actual paid dividends since purchase date (across years)
+          // Existing records will be compared and updated if amounts differ
+          const dividends = await this.fetchAllPaidDividends(ticker, today, assetCreatedDate);
+          if (dividends.length === 0) continue;
 
-        console.log(`  ${ticker}: Found ${dividends.length} dividend(s)`);
+          console.log(`  ${ticker} (${asset.name}): Found ${dividends.length} new dividend(s) since ${assetCreatedDate}`);
 
-        // Process each dividend
-        for (const dividend of dividends) {
-          const dividendDate = dividend.date;
-          console.log(`    Payment date: ${dividendDate}, Amount: $${dividend.amount.toFixed(4)} per share`);
+          // Fetch tax settings once per asset
+          const taxSettings = await this.getUserTaxSettings(asset.user_id);
+          // SGX dividends are not subject to withholding tax
+          const taxRate = asset.market?.toUpperCase() === 'SGX'
+            ? 0
+            : taxSettings.us_dividend_withholding_rate;
 
-          // Create dividend flows for each user holding this stock
-          for (const asset of assets) {
-            const isDuplicate = await this.checkDuplicateDividend(asset.id, dividendDate);
+          // Track cash balances per currency to avoid re-fetching
+          const cashBalanceCache = new Map<string, { id: string; currency: string; balance: number }>();
 
-            if (isDuplicate) {
-              console.log(`      Skipping duplicate for user ${asset.user_id.slice(0, 8)}...`);
-              duplicatesSkipped++;
-              continue;
+          for (const dividend of dividends) {
+            const dividendDate = dividend.date;
+            const dividendCurrency = dividend.currency.toUpperCase();
+
+            // Get cash asset matching dividend currency (with cache)
+            if (!cashBalanceCache.has(dividendCurrency)) {
+              const cashAsset = await this.getPrimaryCashAsset(asset.user_id, dividendCurrency);
+              if (cashAsset) cashBalanceCache.set(dividendCurrency, cashAsset);
             }
-
-            // Calculate gross dividend amount (in USD)
-            const grossAmountUsd = asset.balance * dividend.amount;
-
-            // Get user's tax settings and primary cash asset in parallel
-            const [taxSettings, primaryCashAsset] = await Promise.all([
-              this.getUserTaxSettings(asset.user_id),
-              this.getPrimaryCashAsset(asset.user_id),
-            ]);
+            const primaryCashAsset = cashBalanceCache.get(dividendCurrency);
 
             if (!primaryCashAsset) {
-              console.log(`      No cash asset found for user ${asset.user_id.slice(0, 8)}..., skipping`);
+              console.log(`    No cash asset found for currency ${dividendCurrency}, user ${asset.user_id.slice(0, 8)}..., skipping`);
               continue;
             }
 
-            // Calculate tax using user's settings (in USD)
-            const taxRate = taxSettings.us_dividend_withholding_rate;
-            const taxWithheldUsd = grossAmountUsd * taxRate;
-            const netAmountUsd = grossAmountUsd - taxWithheldUsd;
+            // Calculate gross, tax, net — keep in dividend's currency, no conversion
+            const grossAmount = asset.balance * dividend.amount;
+            const taxWithheld = grossAmount * taxRate;
+            const finalAmount = Math.round((grossAmount - taxWithheld) * 100) / 100;
+            const finalTaxWithheld = Math.round(taxWithheld * 100) / 100;
 
-            // Convert to cash asset's currency if different from USD
-            const targetCurrency = primaryCashAsset.currency;
-            let finalAmount = netAmountUsd;
-            let finalTaxWithheld = taxWithheldUsd;
-            let flowCurrency = 'USD';
+            console.log(`    Payment date: ${dividendDate}, Amount: ${dividend.amount.toFixed(4)} ${dividendCurrency}/share, gross: ${grossAmount.toFixed(2)}, tax (${(taxRate * 100).toFixed(0)}%): ${finalTaxWithheld.toFixed(2)}, net: ${finalAmount.toFixed(2)} ${dividendCurrency}`);
 
-            if (targetCurrency.toUpperCase() !== 'USD') {
-              const rateMap = await getExchangeRates(['USD', targetCurrency]);
-              const conversion = convertAmount(netAmountUsd, 'USD', targetCurrency, rateMap);
-              const taxConversion = convertAmount(taxWithheldUsd, 'USD', targetCurrency, rateMap);
+            // Check if a dividend transaction already exists for this asset + date
+            const existing = await this.findExistingDividend(asset.id, dividendDate);
 
-              if (conversion && taxConversion) {
-                finalAmount = Math.round(conversion.converted * 100) / 100;
-                finalTaxWithheld = Math.round(taxConversion.converted * 100) / 100;
-                flowCurrency = targetCurrency;
-                console.log(`      Converting: $${netAmountUsd.toFixed(2)} USD → ${finalAmount.toFixed(2)} ${targetCurrency} (rate: ${conversion.rate.toFixed(4)})`);
+            if (existing) {
+              const diff = Math.abs(existing.amount - finalAmount);
+              if (diff < 0.001) {
+                console.log(`    Skipping (unchanged): ${asset.name} ${dividendDate}`);
+                continue;
               }
+              // Amount changed — update transaction and adjust cash balance
+              const balanceDiff = finalAmount - existing.amount;
+              await this.updateDividendFlow(existing.id, {
+                amount: finalAmount,
+                currency: dividendCurrency,
+                dividendPerShare: dividend.amount,
+                shares: asset.balance,
+                taxRate,
+                taxWithheld: finalTaxWithheld,
+              });
+              await this.adjustCashBalance(primaryCashAsset.id, primaryCashAsset.balance, balanceDiff);
+              primaryCashAsset.balance += balanceDiff;
+              console.log(`    Updated: ${asset.name} ${dividendDate}, amount ${existing.amount.toFixed(2)} → ${finalAmount.toFixed(2)} ${dividendCurrency}`);
+              dividendsUpdated++;
+            } else {
+              await this.createDividendFlow({
+                userId: asset.user_id,
+                belongId: asset.belong_id,
+                fromAssetId: asset.id,
+                toAssetId: primaryCashAsset.id,
+                toAssetBalance: primaryCashAsset.balance,
+                amount: finalAmount,
+                currency: dividendCurrency,
+                date: dividendDate,
+                stockName: asset.name,
+                ticker: asset.ticker,
+                dividendPerShare: dividend.amount,
+                shares: asset.balance,
+                taxRate,
+                taxWithheld: finalTaxWithheld,
+              });
+              primaryCashAsset.balance += finalAmount;
+              dividendsCreated++;
             }
-
-            // Create dividend income transaction (amount is NET, in cash asset's currency)
-            await this.createDividendFlow({
-              userId: asset.user_id,
-              belongId: asset.belong_id,
-              fromAssetId: asset.id,
-              toAssetId: primaryCashAsset.id,
-              toAssetBalance: primaryCashAsset.balance,
-              amount: finalAmount,
-              currency: flowCurrency,
-              date: dividendDate,
-              stockName: asset.name,
-              ticker: asset.ticker,
-              dividendPerShare: dividend.amount,
-              shares: asset.balance,
-              taxRate: taxRate,
-              taxWithheld: finalTaxWithheld,
-            });
-
-            dividendsCreated++;
-            console.log(`      Created dividend flow: ${asset.name} - gross: $${grossAmountUsd.toFixed(2)}, tax (${(taxRate * 100).toFixed(0)}%): $${taxWithheldUsd.toFixed(2)}, net: ${finalAmount.toFixed(2)} ${flowCurrency}`);
           }
         }
       } catch (error) {
@@ -194,18 +203,17 @@ export class CheckDividendsTask {
 
     console.log(`\nSummary:`);
     console.log(`  Dividends created: ${dividendsCreated}`);
-    console.log(`  Duplicates skipped: ${duplicatesSkipped}`);
+    console.log(`  Dividends updated: ${dividendsUpdated}`);
   }
 
   /**
-   * Get all US stock assets with balance > 0
+   * Get all stock/ETF assets with balance > 0 (all markets)
    */
   private async getUSStockAssets(): Promise<UserAsset[]> {
     const { data, error } = await this.supabase
       .from('assets')
-      .select('id, user_id, belong_id, name, ticker, balance, currency')
+      .select('id, user_id, belong_id, name, ticker, balance, currency, created_at, market')
       .in('type', ['stock', 'etf'])
-      .eq('market', 'US')
       .gt('balance', 0)
       .not('ticker', 'is', null);
 
@@ -217,67 +225,105 @@ export class CheckDividendsTask {
   }
 
   /**
-   * Fetch recent dividends from findata service
-   * Returns dividends that have already been paid (payment date <= today)
-   * Duplicate check happens later to avoid re-creating existing flows
+   * Fetch all actual (non-forecasted) paid dividends from startDate up to today.
+   * Queries all years between startDate and today to avoid missing any payments.
    */
-  private async fetchPaidDividends(ticker: string, today: string): Promise<PaidDividend[]> {
+  private async fetchAllPaidDividends(ticker: string, today: string, fromDate?: string): Promise<PaidDividend[]> {
     try {
-      // Fetch dividend data for current year from findata
       const currentYear = new Date().getFullYear();
-      const dividendData = await findata.fetchDividends(ticker, currentYear);
+      const startYear = fromDate ? new Date(fromDate).getFullYear() : currentYear;
 
-      if (!dividendData || !dividendData.has_dividends) {
-        return [];
-      }
-
-      // Look back 30 days to catch any missed dividends
-      const todayDate = new Date(today);
-      const startDate = new Date(todayDate);
-      startDate.setDate(startDate.getDate() - 30);
-      const startDateStr = startDate.toISOString().split('T')[0];
-
-      // Filter to actual dividends (not forecasted) that are within the date range
+      // Collect dividends across all relevant years
       const paidDividends: PaidDividend[] = [];
-      for (const div of dividendData.dividends) {
-        // Only include actual dividends (not forecasted)
-        if (div.is_forecasted) continue;
+      for (let year = startYear; year <= currentYear; year++) {
+        const dividendData = await findata.fetchDividends(ticker, year);
+        if (!dividendData || !dividendData.has_dividends) continue;
 
-        // Check if date is within the last 30 days and <= today
-        if (div.date >= startDateStr && div.date <= today) {
+        for (const div of dividendData.dividends) {
+          if (div.is_forecasted) continue;
+          if (div.date > today) continue;
+          if (fromDate && div.date <= fromDate) continue; // skip before asset purchase date
+
           paidDividends.push({
             amount: div.amount,
             date: div.date,
+            currency: dividendData.currency,
           });
         }
       }
 
+      // Sort by date ascending so they're processed in order
+      paidDividends.sort((a, b) => a.date.localeCompare(b.date));
       return paidDividends;
     } catch (error) {
-      // Log but don't throw - some tickers may not have dividend data
       console.log(`  ${ticker}: No dividend data available`);
       return [];
     }
   }
 
   /**
-   * Check if a dividend transaction already exists for this asset and date
+   * Find an existing dividend transaction for an asset on a specific date
    */
-  private async checkDuplicateDividend(assetId: string, date: string): Promise<boolean> {
+  private async findExistingDividend(assetId: string, date: string): Promise<{ id: string; amount: number } | null> {
     const { data, error } = await this.supabase
       .from('transactions')
-      .select('id')
+      .select('id, amount')
       .eq('source_asset_id', assetId)
       .eq('date', date)
       .eq('category', 'dividend')
-      .limit(1);
+      .limit(1)
+      .single();
+
+    if (error || !data) return null;
+    return { id: data.id, amount: data.amount };
+  }
+
+  /**
+   * Update an existing dividend transaction with new amounts
+   */
+  private async updateDividendFlow(transactionId: string, params: {
+    amount: number;
+    currency: string;
+    dividendPerShare: number;
+    shares: number;
+    taxRate: number;
+    taxWithheld: number;
+  }): Promise<void> {
+    const { error } = await this.supabase
+      .from('transactions')
+      .update({
+        amount: params.amount,
+        currency: params.currency,
+        needs_review: true,
+        metadata: {
+          dividend_per_share: params.dividendPerShare,
+          share_count: params.shares,
+          tax_rate: params.taxRate,
+          tax_withheld: params.taxWithheld,
+        },
+      })
+      .eq('id', transactionId);
 
     if (error) {
-      console.error('Error checking for duplicate:', error);
-      return false;
+      throw new Error(`Failed to update dividend transaction: ${error.message}`);
     }
+  }
 
-    return (data?.length || 0) > 0;
+  /**
+   * Adjust cash asset balance by a delta amount
+   */
+  private async adjustCashBalance(assetId: string, currentBalance: number, delta: number): Promise<void> {
+    const { error } = await this.supabase
+      .from('assets')
+      .update({
+        balance: currentBalance + delta,
+        balance_updated_at: new Date().toISOString(),
+      })
+      .eq('id', assetId);
+
+    if (error) {
+      throw new Error(`Failed to adjust cash balance: ${error.message}`);
+    }
   }
 
   /**
@@ -301,23 +347,26 @@ export class CheckDividendsTask {
   }
 
   /**
-   * Get user's primary cash asset (first cash asset)
+   * Get the cash asset matching the given currency.
+   * Falls back to the first cash asset if no match found.
    */
-  private async getPrimaryCashAsset(userId: string): Promise<{ id: string; currency: string; balance: number } | null> {
+  private async getPrimaryCashAsset(userId: string, preferredCurrency?: string): Promise<{ id: string; currency: string; balance: number } | null> {
     const { data, error } = await this.supabase
       .from('assets')
       .select('id, currency, balance')
       .eq('user_id', userId)
       .eq('type', 'cash')
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .single();
+      .order('created_at', { ascending: true });
 
-    if (error || !data) {
-      return null;
+    if (error || !data || data.length === 0) return null;
+
+    if (preferredCurrency) {
+      const match = data.find(a => a.currency.toUpperCase() === preferredCurrency.toUpperCase());
+      if (match) return { id: match.id, currency: match.currency, balance: match.balance };
     }
 
-    return { id: data.id, currency: data.currency, balance: data.balance };
+    // Fallback to first cash asset
+    return { id: data[0].id, currency: data[0].currency, balance: data[0].balance };
   }
 
   /**

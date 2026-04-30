@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues, ViewContext } from '../utils/family-context';
+import { getViewContext, ViewContext } from '../utils/family-context';
 import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
@@ -84,7 +84,7 @@ export const createTransaction = async (
   try {
     const userId = req.user!.id;
     const viewContext = await getViewContext(req);
-    const ownershipValues = buildOwnershipValues(viewContext);
+    const ownershipValues = { user_id: viewContext.userId, belong_id: viewContext.belongId };
 
     const {
       type,
@@ -205,12 +205,12 @@ async function handleInvest(
 
   // If to_asset_id is provided, use that asset directly (e.g., metals, pre-created assets)
   if (to_asset_id) {
-    const assetQuery = applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('*'),
-      to_asset_id,
-      viewContext
-    );
-    const { data: existingAsset } = await assetQuery.single();
+    const { data: existingAsset } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', to_asset_id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
     if (!existingAsset) {
       throw new AppError('Target asset not found', 400);
     }
@@ -219,12 +219,12 @@ async function handleInvest(
     // Find or create asset by ticker
     const tickerUpper = ticker!.toUpperCase();
 
-    let assetQuery = supabaseAdmin
+    const { data: existingAsset } = await supabaseAdmin
       .from('assets')
       .select('*')
-      .eq('ticker', tickerUpper);
-    assetQuery = applyOwnershipFilter(assetQuery, viewContext);
-    const { data: existingAsset } = await assetQuery.single();
+      .eq('ticker', tickerUpper)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (existingAsset) {
       asset = existingAsset;
@@ -257,12 +257,12 @@ async function handleInvest(
   // Decrease from_asset (cash) balance if provided
   let fromAsset: Asset | undefined;
   if (from_asset_id) {
-    const fromAssetQuery = applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('*'),
-      from_asset_id,
-      viewContext
-    );
-    const { data: fa } = await fromAssetQuery.single();
+    const { data: fa } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', from_asset_id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
     if (!fa) {
       throw new AppError('From asset not found', 400);
     }
@@ -366,24 +366,24 @@ async function handleSell(
   // Find the asset to sell
   let asset: Asset;
   if (from_asset_id) {
-    const assetQuery = applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('*'),
-      from_asset_id,
-      viewContext
-    );
-    const { data: a } = await assetQuery.single();
+    const { data: a } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', from_asset_id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
     if (!a) {
       throw new AppError('Asset not found', 400);
     }
     asset = a;
   } else {
     const tickerUpper = ticker!.toUpperCase();
-    let assetQuery = supabaseAdmin
+    const { data: a } = await supabaseAdmin
       .from('assets')
       .select('*')
-      .eq('ticker', tickerUpper);
-    assetQuery = applyOwnershipFilter(assetQuery, viewContext);
-    const { data: a } = await assetQuery.single();
+      .eq('ticker', tickerUpper)
+      .eq('belong_id', viewContext.belongId)
+      .single();
     if (!a) {
       throw new AppError(`Asset ${tickerUpper} not found`, 400);
     }
@@ -407,12 +407,12 @@ async function handleSell(
   // Increase to_asset (cash) balance if provided
   let toAsset: Asset | undefined;
   if (to_asset_id) {
-    const toAssetQuery = applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('*'),
-      to_asset_id,
-      viewContext
-    );
-    const { data: ta } = await toAssetQuery.single();
+    const { data: ta } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', to_asset_id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
     if (!ta) {
       throw new AppError('To asset not found', 400);
     }
@@ -502,8 +502,8 @@ async function handleTransfer(
 
   // Fetch both assets
   const [fromAssetResult, toAssetResult] = await Promise.all([
-    applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('*'), from_asset_id, viewContext).single(),
-    applyOwnershipFilterWithId(supabaseAdmin.from('assets').select('*'), to_asset_id, viewContext).single(),
+    supabaseAdmin.from('assets').select('*').eq('id', from_asset_id).eq('belong_id', viewContext.belongId).single(),
+    supabaseAdmin.from('assets').select('*').eq('id', to_asset_id).eq('belong_id', viewContext.belongId).single(),
   ]);
 
   if (!fromAssetResult.data) {

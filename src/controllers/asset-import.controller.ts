@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, AssetType } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, buildOwnershipValues } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 // Agent service URL (same as runway agent - now multi-agent service)
 const AGENT_SERVICE_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
@@ -108,10 +108,11 @@ export const analyzeImport = async (
     const viewContext = await getViewContext(req);
 
     // Get existing assets with tickers to check for duplicates (using belong_id filter)
-    const { data: existingAssets } = await applyOwnershipFilter(
-      supabaseAdmin.from('assets').select('id, name, ticker, balance'),
-      viewContext
-    ).not('ticker', 'is', null);
+    const { data: existingAssets } = await supabaseAdmin
+      .from('assets')
+      .select('id, name, ticker, balance')
+      .eq('belong_id', viewContext.belongId)
+      .not('ticker', 'is', null);
 
     // Build map of existing tickers
     const existingTickers: Record<string, { asset_id: string; name: string; balance: number }> = {};
@@ -173,10 +174,11 @@ export const confirmImport = async (
     const viewContext = await getViewContext(req);
 
     // Get existing assets with tickers (using belong_id filter)
-    const { data: existingAssets } = await applyOwnershipFilter(
-      supabaseAdmin.from('assets').select('id, ticker, balance'),
-      viewContext
-    ).not('ticker', 'is', null);
+    const { data: existingAssets } = await supabaseAdmin
+      .from('assets')
+      .select('id, ticker, balance')
+      .eq('belong_id', viewContext.belongId)
+      .not('ticker', 'is', null);
 
     const existingByTicker = new Map<string, { id: string; balance: number }>();
     (existingAssets || []).forEach((asset) => {
@@ -218,14 +220,13 @@ export const confirmImport = async (
         updated++;
       } else {
         // Create new asset with ownership values (user_id + belong_id)
-        const ownershipValues = buildOwnershipValues(viewContext);
-
         // Default market to 'US' for stocks/ETFs with tickers (most common case for broker imports)
         const inferredMarket = asset.market ||
           ((asset.type === 'stock' || asset.type === 'etf') && asset.ticker ? 'US' : null);
 
         const newAsset = {
-          ...ownershipValues,
+          user_id: viewContext.userId,
+          belong_id: viewContext.belongId,
           name: asset.name,
           type: asset.type,
           ticker: asset.ticker,

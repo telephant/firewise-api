@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
-import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
 import * as findata from '../utils/findata-client';
 
@@ -115,7 +115,7 @@ export const getDividendCalendar = async (
       .select('*')
       .in('type', ['stock', 'etf'])
       .not('ticker', 'is', null);
-    assetsQuery = applyOwnershipFilter(assetsQuery, viewContext);
+    assetsQuery = assetsQuery.eq('belong_id', viewContext.belongId);
 
     const { data: stockAssets, error: assetsError } = await assetsQuery;
 
@@ -141,7 +141,7 @@ export const getDividendCalendar = async (
       .eq('category', 'dividend')
       .gte('date', `${year}-01-01`)
       .lte('date', `${year}-12-31`);
-    dividendsQuery = applyOwnershipFilter(dividendsQuery, viewContext);
+    dividendsQuery = dividendsQuery.eq('belong_id', viewContext.belongId);
 
     const { data: actualDividends, error: dividendsError } = await dividendsQuery;
 

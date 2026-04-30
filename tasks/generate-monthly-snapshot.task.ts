@@ -158,21 +158,27 @@ export class GenerateMonthlySnapshotTask {
       const lastDay = new Date(this.targetYear, this.targetMonth, 0).getDate();
       const endDate = `${this.targetYear}-${String(this.targetMonth).padStart(2, '0')}-${lastDay}`;
 
-      // Fetch assets
+      // Fetch assets that existed at end of target month
+      // IMPORTANT: Filter by created_at to exclude assets created after the target month
       const { data: assets, error: assetsError } = await this.supabase
         .from('assets')
         .select('id, name, type, ticker, balance, currency')
-        .eq('belong_id', belongId);
+        .eq('belong_id', belongId)
+        .lte('created_at', `${endDate}T23:59:59Z`);
 
       if (assetsError) throw new Error(`Assets: ${assetsError.message}`);
+      console.log(`    Assets (created <= ${endDate}): ${(assets || []).length}`);
 
-      // Fetch debts (include paid_off to capture historical state)
+      // Fetch debts that existed at end of target month
+      // IMPORTANT: Filter by created_at to exclude debts created after the target month
       const { data: debts, error: debtsError } = await this.supabase
         .from('debts')
         .select('id, name, debt_type, current_balance, currency')
-        .eq('belong_id', belongId);
+        .eq('belong_id', belongId)
+        .lte('created_at', `${endDate}T23:59:59Z`);
 
       if (debtsError) throw new Error(`Debts: ${debtsError.message}`);
+      console.log(`    Debts (created <= ${endDate}): ${(debts || []).length}`);
 
       // Calculate date for "after target month" transactions
       const afterMonthStart = new Date(this.targetYear, this.targetMonth, 1).toISOString().split('T')[0];

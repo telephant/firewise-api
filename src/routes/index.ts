@@ -32,6 +32,15 @@ import dividendCalendarRoutes from './dividend-calendar.routes';
 import passiveIncomeRoutes from './passive-income.routes';
 import monthlySummaryRoutes from './monthly-summary.routes';
 import monthlySnapshotRoutes from './monthly-snapshot.routes';
+import performanceRoutes from './performance.routes';
+import portfolioRoutes from './portfolio.routes';
+import tradeRoutes from './trade.routes';
+import holdingRoutes from './holding.routes';
+import dividendRoutes from './dividend.routes';
+import portfolioStatsRoutes from './portfolio-stats.routes';
+import portfolioFamilyRoutes from './portfolio-family.routes';
+import exchangeRateRoutes from './exchange-rate.routes';
+import realizedPlRoutes from './realized-pl.routes';
 
 const router = Router();
 
@@ -78,5 +87,16 @@ router.use('/fire/dividend-calendar', dividendCalendarRoutes);
 router.use('/fire/passive-income', passiveIncomeRoutes);
 router.use('/fire/monthly-summary', monthlySummaryRoutes);
 router.use('/fire/snapshots', monthlySnapshotRoutes);
+router.use('/fire/performance', performanceRoutes);
+
+// Portfolio tracker routes
+router.use('/portfolios', portfolioRoutes);
+router.use('/portfolios', tradeRoutes);
+router.use('/portfolios', holdingRoutes);
+router.use('/portfolios', dividendRoutes);
+router.use('/portfolios', portfolioStatsRoutes);
+router.use('/exchange-rates', exchangeRateRoutes);
+router.use('/portfolios', realizedPlRoutes);
+router.use('/family', portfolioFamilyRoutes);
 
 export default router;

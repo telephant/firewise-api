@@ -57,12 +57,8 @@ const searchSymbols = async (req, res) => {
             return;
         }
         const maxResults = Math.min(parseInt(limit, 10) || 10, 20);
-        // Handle comma-separated types - use first one for findata API
-        let searchType;
-        if (type && type !== 'all') {
-            const types = type.split(',').map((t) => t.trim());
-            searchType = types[0]; // Use first type for API call
-        }
+        // Pass full type string to findata (it handles comma-separated types)
+        const searchType = type && type !== 'all' ? type : undefined;
         // Fetch from findata service
         const results = await findata.searchSymbols(searchTerm, {
             region: region,
@@ -80,11 +76,6 @@ const searchSymbols = async (req, res) => {
             sector: r.sector || undefined,
             industry: r.industry || undefined,
         }));
-        // Additional client-side filtering if multiple types specified
-        if (type && type !== 'all' && type.includes(',')) {
-            const allowedTypes = new Set(type.split(',').map((t) => t.trim()));
-            symbols = symbols.filter((s) => allowedTypes.has(s.type));
-        }
         // Limit results
         symbols = symbols.slice(0, maxResults);
         res.json({

@@ -6,11 +6,14 @@ import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/cu
 import { DataQuality } from '../utils/data-window';
 import { fetchStockPrices } from '../utils/stock-price';
 import { getFinancialStats } from '../utils/financial-stats';
-import { getViewContext, applyOwnershipFilter, ViewContext } from '../utils/family-context';
+import { getViewContext, ViewContext } from '../utils/family-context';
 
 // Agent service URL (Railway internal network)
 const RUNWAY_AGENT_URL = process.env.RUNWAY_AGENT_URL || 'http://localhost:8000';
+const FINDATA_API_URL = process.env.FINDATA_URL || 'http://localhost:8000';
 console.log('[Runway] Agent URL configured as:', RUNWAY_AGENT_URL);
+console.log('[Findata] API URL configured as:', FINDATA_API_URL);
+
 
 // Types matching agent service schemas
 interface GrowthRates {
@@ -198,15 +201,16 @@ async function collectFinancialData(viewContext: ViewContext, preferredCurrency:
   const financialStats = await getFinancialStats(viewContext);
 
   // Build queries with simple belong_id ownership filter
-  const assetsQuery = applyOwnershipFilter(
-    supabaseAdmin.from('assets').select('*'),
-    viewContext
-  );
+  const assetsQuery = supabaseAdmin
+    .from('assets')
+    .select('*')
+    .eq('belong_id', viewContext.belongId);
 
-  const debtsQuery = applyOwnershipFilter(
-    supabaseAdmin.from('debts').select('*'),
-    viewContext
-  ).gt('current_balance', 0);
+  const debtsQuery = supabaseAdmin
+    .from('debts')
+    .select('*')
+    .eq('belong_id', viewContext.belongId)
+    .gt('current_balance', 0);
 
   // Fetch assets and debts for agent (need detailed breakdown)
   const [assetsResult, debtsResult] = await Promise.all([

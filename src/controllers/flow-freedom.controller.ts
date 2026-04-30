@@ -4,7 +4,7 @@ import { AuthenticatedRequest, ApiResponse, Debt } from '../types';
 import { AppError } from '../middleware/error';
 import { DataQuality, ConfidenceLevel } from '../utils/data-window';
 import { getFinancialStats } from '../utils/financial-stats';
-import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 // Debt item for breakdown
 interface DebtBreakdownItem {
@@ -85,15 +85,16 @@ export const getFlowFreedom = async (
     const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
     // Build queries with ownership filter (simple belong_id)
-    const debtsQuery = applyOwnershipFilter(
-      supabaseAdmin.from('debts').select('*'),
-      viewContext
-    ).gt('current_balance', 0);
+    const debtsQuery = supabaseAdmin
+      .from('debts')
+      .select('*')
+      .eq('belong_id', viewContext.belongId)
+      .gt('current_balance', 0);
 
-    const pendingQuery = applyOwnershipFilter(
-      supabaseAdmin.from('transactions').select('type, category, source_asset_id, needs_review'),
-      viewContext
-    )
+    const pendingQuery = supabaseAdmin
+      .from('transactions')
+      .select('type, category, source_asset_id, needs_review')
+      .eq('belong_id', viewContext.belongId)
       .eq('needs_review', true)
       .in('type', ['income', 'expense'])
       .gte('date', formatDate(twelveMonthsAgo));

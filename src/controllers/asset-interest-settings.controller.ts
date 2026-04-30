@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 // Payment period options
 export type PaymentPeriod =
@@ -53,11 +53,12 @@ export const getAssetInterestSettings = async (
     const viewContext = await getViewContext(req);
 
     // Verify asset belongs to user/family
-    const { data: asset, error: assetError } = await applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('id'),
-      assetId,
-      viewContext
-    ).single();
+    const { data: asset, error: assetError } = await supabaseAdmin
+      .from('assets')
+      .select('id')
+      .eq('id', assetId)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (assetError || !asset) {
       res.status(404).json({ success: false, error: 'Asset not found' });
@@ -105,10 +106,11 @@ export const getAllAssetInterestSettings = async (
     const viewContext = await getViewContext(req);
 
     // Get all user/family's deposit assets
-    const { data: depositAssets, error: assetsError } = await applyOwnershipFilter(
-      supabaseAdmin.from('assets').select('id'),
-      viewContext
-    ).eq('type', 'deposit');
+    const { data: depositAssets, error: assetsError } = await supabaseAdmin
+      .from('assets')
+      .select('id')
+      .eq('belong_id', viewContext.belongId)
+      .eq('type', 'deposit');
 
     if (assetsError) {
       console.error('Error fetching deposit assets:', assetsError);
@@ -184,11 +186,12 @@ export const upsertAssetInterestSettings = async (
     const viewContext = await getViewContext(req);
 
     // Verify asset belongs to user/family and is a deposit type
-    const { data: asset, error: assetError } = await applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('id, type'),
-      assetId,
-      viewContext
-    ).single();
+    const { data: asset, error: assetError } = await supabaseAdmin
+      .from('assets')
+      .select('id, type')
+      .eq('id', assetId)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (assetError || !asset) {
       res.status(404).json({ success: false, error: 'Asset not found' });
@@ -249,11 +252,12 @@ export const deleteAssetInterestSettings = async (
     const viewContext = await getViewContext(req);
 
     // Verify asset belongs to user/family
-    const { data: asset, error: assetError } = await applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('id'),
-      assetId,
-      viewContext
-    ).single();
+    const { data: asset, error: assetError } = await supabaseAdmin
+      .from('assets')
+      .select('id')
+      .eq('id', assetId)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (assetError || !asset) {
       res.status(404).json({ success: false, error: 'Asset not found' });

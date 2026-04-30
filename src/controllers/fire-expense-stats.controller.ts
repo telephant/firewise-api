@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
-import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 // Response types for expense stats
 interface CategoryBreakdown {
@@ -77,17 +77,17 @@ export const getExpenseStats = async (
     const shouldConvert = userPrefs?.convert_all_to_preferred || false;
 
     // Build transactions query with family/personal context (using simple belong_id filter)
-    const transactionsQuery = applyOwnershipFilter(
-      supabaseAdmin.from('transactions').select(`
+    const transactionsQuery = supabaseAdmin
+      .from('transactions')
+      .select(`
         type,
         amount,
         currency,
         date,
         expense_category_id,
         expense_category:flow_expense_categories(id, name, icon)
-      `),
-      viewContext
-    )
+      `)
+      .eq('belong_id', viewContext.belongId)
       .in('type', ['expense', 'income'])
       .gte('date', formatDate(sixMonthsAgoStart))
       .lte('date', formatDate(currentMonthEnd));
@@ -96,10 +96,10 @@ export const getExpenseStats = async (
     // This is more efficient than multiple queries
     const [transactionsResult, linkedLedgersResult] = await Promise.all([
       transactionsQuery,
-      applyOwnershipFilter(
-        supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
-        viewContext
-      ),
+      supabaseAdmin
+        .from('fire_linked_ledgers')
+        .select('ledger_id')
+        .eq('belong_id', viewContext.belongId),
     ]);
 
     if (transactionsResult.error) {

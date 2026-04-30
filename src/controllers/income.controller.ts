@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, Transaction } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
@@ -68,7 +68,6 @@ export const createIncome = async (
   try {
     const userId = req.user!.id;
     const viewContext = await getViewContext(req);
-    const ownershipValues = buildOwnershipValues(viewContext);
 
     const {
       category,
@@ -112,12 +111,12 @@ export const createIncome = async (
     // Skip if no target asset (for no-account interest)
     let toAsset: Asset | null = null;
     if (to_asset_id) {
-      const toAssetQuery = applyOwnershipFilterWithId(
-        supabaseAdmin.from('assets').select('*'),
-        to_asset_id,
-        viewContext
-      );
-      const { data: ta, error: toAssetError } = await toAssetQuery.single();
+      const { data: ta, error: toAssetError } = await supabaseAdmin
+        .from('assets')
+        .select('*')
+        .eq('id', to_asset_id)
+        .eq('belong_id', viewContext.belongId)
+        .single();
 
       if (toAssetError || !ta) {
         res.status(400).json({ success: false, error: 'To asset not found' });
@@ -129,12 +128,12 @@ export const createIncome = async (
     // Optionally validate from_asset_id (e.g., stock for dividend)
     let fromAsset: Asset | null = null;
     if (from_asset_id) {
-      const fromAssetQuery = applyOwnershipFilterWithId(
-        supabaseAdmin.from('assets').select('*'),
-        from_asset_id,
-        viewContext
-      );
-      const { data: fa, error: faError } = await fromAssetQuery.single();
+      const { data: fa, error: faError } = await supabaseAdmin
+        .from('assets')
+        .select('*')
+        .eq('id', from_asset_id)
+        .eq('belong_id', viewContext.belongId)
+        .single();
       if (faError || !fa) {
         res.status(400).json({ success: false, error: 'From asset not found' });
         return;
@@ -199,7 +198,7 @@ export const createIncome = async (
     const { data: transaction, error: txError } = await supabaseAdmin
       .from('transactions')
       .insert({
-        belong_id: ownershipValues.belong_id,
+        belong_id: viewContext.belongId,
         type: 'income',
         category: category,
         amount: amount,

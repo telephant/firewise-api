@@ -7,7 +7,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { Debt } from '../types';
 import { getUserPreferences, sumWithConversion, MoneyEntry, getExchangeRates, convertAmount } from './currency-conversion';
 import { calculateDataWindow, mapToMonthlyData, DataQuality } from './data-window';
-import { ViewContext, applyOwnershipFilter } from './family-context';
+import { ViewContext } from './family-context';
 
 // Passive income categories
 const PASSIVE_INCOME_CATEGORIES = ['dividend', 'rental', 'interest'];
@@ -113,27 +113,25 @@ async function calculateFinancialStats(viewContext: ViewContext): Promise<Financ
   const formatDate = (d: Date) => d.toISOString().split('T')[0];
 
   // Build base queries with simple belong_id ownership filter
-  const transactionsQuery = applyOwnershipFilter(
-    supabaseAdmin.from('transactions').select('type, amount, currency, date, category, source_asset_id, needs_review'),
-    viewContext
-  )
+  const transactionsQuery = supabaseAdmin
+    .from('transactions')
+    .select('type, amount, currency, date, category, source_asset_id, needs_review')
+    .eq('belong_id', viewContext.belongId)
     .in('type', ['income', 'expense'])
     .gte('date', formatDate(twelveMonthsAgo))
     .neq('category', 'adjustment')
     .eq('needs_review', false); // Only include reviewed transactions
 
-  const debtsQuery = applyOwnershipFilter(
-    supabaseAdmin.from('debts').select('*'),
-    viewContext
-  ).gt('current_balance', 0);
+  const debtsQuery = supabaseAdmin
+    .from('debts')
+    .select('*')
+    .eq('belong_id', viewContext.belongId)
+    .gt('current_balance', 0);
 
   // Fetch all data in parallel with ownership filter
   const [transactionsResult, linkedLedgersResult, debtsResult] = await Promise.all([
     transactionsQuery,
-    applyOwnershipFilter(
-      supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'),
-      viewContext
-    ),
+    supabaseAdmin.from('fire_linked_ledgers').select('ledger_id').eq('belong_id', viewContext.belongId),
     debtsQuery,
   ]);
 

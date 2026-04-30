@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Debt, DebtFilters, Asset } from '../types';
 import { AppError } from '../middleware/error';
 import { addConvertedFieldsToArray, addConvertedFieldsToSingle, getExchangeRates, convertAmount } from '../utils/currency-conversion';
-import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 /**
  * Get all debts for the authenticated user
@@ -27,8 +27,8 @@ export const getDebts = async (
       .select('*', { count: 'exact' })
       .order('created_at', { ascending: false });
 
-    // Apply ownership filter (family or personal)
-    query = applyOwnershipFilter(query, viewContext);
+    // Apply ownership filter
+    query = query.eq('belong_id', viewContext.belongId);
 
     if (status) {
       query = query.eq('status', status);
@@ -79,10 +79,12 @@ export const getDebt = async (
     const { id } = req.params;
 
     // Build query with family/personal context
-    let query = supabaseAdmin.from('debts').select('*');
-    query = applyOwnershipFilterWithId(query, id, viewContext);
-
-    const { data: debt, error } = await query.single();
+    const { data: debt, error } = await supabaseAdmin
+      .from('debts')
+      .select('*')
+      .eq('id', id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (error || !debt) {
       res.status(404).json({ success: false, error: 'Debt not found' });
@@ -144,12 +146,12 @@ export const createDebt = async (
 
     // Verify property_asset_id belongs to user/family if provided
     if (property_asset_id) {
-      let assetQuery = supabaseAdmin
+      const { data: propertyAsset, error: assetError } = await supabaseAdmin
         .from('assets')
         .select('id')
-        .eq('id', property_asset_id);
-      assetQuery = applyOwnershipFilter(assetQuery, viewContext);
-      const { data: propertyAsset, error: assetError } = await assetQuery.single();
+        .eq('id', property_asset_id)
+        .eq('belong_id', viewContext.belongId)
+        .single();
 
       if (assetError || !propertyAsset) {
         res.status(400).json({ success: false, error: 'Property asset not found' });
@@ -159,13 +161,11 @@ export const createDebt = async (
 
     const principalAmount = parseFloat(principal);
 
-    // Get ownership values based on view mode (personal or family)
-    const ownershipValues = buildOwnershipValues(viewContext);
-
     const { data: debt, error } = await supabaseAdmin
       .from('debts')
       .insert({
-        ...ownershipValues,
+        user_id: viewContext.userId,
+        belong_id: viewContext.belongId,
         name: name.trim(),
         debt_type: debt_type || 'other',
         currency: currency || 'USD',
@@ -224,10 +224,12 @@ export const updateDebt = async (
     } = req.body;
 
     // Check if debt exists and belongs to user/family
-    let checkQuery = supabaseAdmin.from('debts').select('id');
-    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
-
-    const { data: existingDebt, error: fetchError } = await checkQuery.single();
+    const { data: existingDebt, error: fetchError } = await supabaseAdmin
+      .from('debts')
+      .select('id')
+      .eq('id', id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (fetchError || !existingDebt) {
       res.status(404).json({ success: false, error: 'Debt not found' });
@@ -292,10 +294,12 @@ export const deleteDebt = async (
     const { id } = req.params;
 
     // Check if debt exists and belongs to user/family
-    let checkQuery = supabaseAdmin.from('debts').select('id');
-    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
-
-    const { data: existingDebt, error: fetchError } = await checkQuery.single();
+    const { data: existingDebt, error: fetchError } = await supabaseAdmin
+      .from('debts')
+      .select('id')
+      .eq('id', id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (fetchError || !existingDebt) {
       res.status(404).json({ success: false, error: 'Debt not found' });
@@ -330,10 +334,12 @@ export const getDebtPayments = async (
     const { id } = req.params;
 
     // Verify debt belongs to user/family
-    let checkQuery = supabaseAdmin.from('debts').select('id');
-    checkQuery = applyOwnershipFilterWithId(checkQuery, id, viewContext);
-
-    const { data: debt, error: debtError } = await checkQuery.single();
+    const { data: debt, error: debtError } = await supabaseAdmin
+      .from('debts')
+      .select('id')
+      .eq('id', id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (debtError || !debt) {
       res.status(404).json({ success: false, error: 'Debt not found' });
@@ -377,10 +383,12 @@ export const getDebtAmortization = async (
     const { id } = req.params;
 
     // Build query with family/personal context
-    let query = supabaseAdmin.from('debts').select('*');
-    query = applyOwnershipFilterWithId(query, id, viewContext);
-
-    const { data: debt, error } = await query.single();
+    const { data: debt, error } = await supabaseAdmin
+      .from('debts')
+      .select('*')
+      .eq('id', id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (error || !debt) {
       res.status(404).json({ success: false, error: 'Debt not found' });
@@ -473,7 +481,7 @@ export const createDebtTransaction = async (
   try {
     const userId = req.user!.id;
     const viewContext = await getViewContext(req);
-    const ownershipValues = buildOwnershipValues(viewContext);
+    const ownershipValues = { user_id: viewContext.userId, belong_id: viewContext.belongId };
 
     const {
       type,
@@ -559,12 +567,12 @@ export const createDebtTransaction = async (
       let flowId: string | undefined;
 
       if (disburse_to_asset_id) {
-        const toAssetQuery = applyOwnershipFilterWithId(
-          supabaseAdmin.from('assets').select('*'),
-          disburse_to_asset_id,
-          viewContext
-        );
-        const { data: ta, error: taError } = await toAssetQuery.single();
+        const { data: ta, error: taError } = await supabaseAdmin
+          .from('assets')
+          .select('*')
+          .eq('id', disburse_to_asset_id)
+          .eq('belong_id', viewContext.belongId)
+          .single();
         if (taError || !ta) {
           res.status(400).json({ success: false, error: 'Disburse asset not found' });
           return;
@@ -628,12 +636,12 @@ export const createDebtTransaction = async (
       }
 
       // Fetch the debt
-      const debtQuery = applyOwnershipFilterWithId(
-        supabaseAdmin.from('debts').select('*'),
-        debt_id,
-        viewContext
-      );
-      const { data: debt, error: debtError } = await debtQuery.single();
+      const { data: debt, error: debtError } = await supabaseAdmin
+        .from('debts')
+        .select('*')
+        .eq('id', debt_id)
+        .eq('belong_id', viewContext.belongId)
+        .single();
 
       if (debtError || !debt) {
         res.status(400).json({ success: false, error: 'Debt not found' });
@@ -643,12 +651,12 @@ export const createDebtTransaction = async (
       // Decrease from_asset (cash) if provided
       let fromAsset: Asset | undefined;
       if (from_asset_id) {
-        const fromAssetQuery = applyOwnershipFilterWithId(
-          supabaseAdmin.from('assets').select('*'),
-          from_asset_id,
-          viewContext
-        );
-        const { data: fa, error: faError } = await fromAssetQuery.single();
+        const { data: fa, error: faError } = await supabaseAdmin
+          .from('assets')
+          .select('*')
+          .eq('id', from_asset_id)
+          .eq('belong_id', viewContext.belongId)
+          .single();
         if (faError || !fa) {
           res.status(400).json({ success: false, error: 'From asset not found' });
           return;

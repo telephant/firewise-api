@@ -166,14 +166,51 @@ export class ProcessRecurringTask {
         // - expense/debt_payment: from_asset_id (where money comes from)
         // - buy: to_asset_id (investment being bought)
         // - sell: from_asset_id (investment being sold)
-        let assetId: string | null = null;
+        let rawAssetId: string | null = null;
         if (template.type === 'income' || template.type === 'buy') {
-          assetId = template.to_asset_id;
+          rawAssetId = template.to_asset_id;
         } else if (template.type === 'expense' || template.type === 'debt_payment' || template.type === 'sell') {
-          assetId = template.from_asset_id;
+          rawAssetId = template.from_asset_id;
         } else {
-          assetId = template.to_asset_id || template.from_asset_id;
+          rawAssetId = template.to_asset_id || template.from_asset_id;
         }
+
+        // Validate asset_id exists to avoid foreign key constraint errors
+        let assetId: string | null = null;
+        if (rawAssetId) {
+          const { data: assetCheck } = await this.supabase
+            .from('assets')
+            .select('id')
+            .eq('id', rawAssetId)
+            .single();
+          if (assetCheck) {
+            assetId = rawAssetId;
+          } else {
+            console.log(`  ⚠ asset_id ${rawAssetId.slice(0, 8)}... not found, setting to null`);
+          }
+        }
+
+        // Validate debt_id exists to avoid foreign key constraint errors
+        let debtId: string | null = null;
+        if (template.debt_id) {
+          const { data: debtCheck } = await this.supabase
+            .from('debts')
+            .select('id')
+            .eq('id', template.debt_id)
+            .single();
+          if (debtCheck) {
+            debtId = template.debt_id;
+          } else {
+            console.log(`  ⚠ debt_id ${template.debt_id.slice(0, 8)}... not found, setting to null`);
+          }
+        }
+
+        // Extract shares and price_per_share from metadata for buy/sell transactions
+        const metadata = template.metadata as Record<string, unknown> | null;
+        const shares = metadata?.shares as number | undefined;
+        const pricePerShare = shares && shares > 0 && template.amount > 0
+          ? template.amount / shares
+          : (metadata?.price_per_share as number | undefined);
 
         // Create the transaction (transactions table uses belong_id, not user_id)
         const { data: newTransaction, error: txError } = await this.supabase
@@ -184,8 +221,8 @@ export class ProcessRecurringTask {
             amount: template.amount,
             currency: template.currency,
             asset_id: assetId,
-            source_asset_id: template.type === 'income' ? null : template.from_asset_id,
-            debt_id: template.debt_id,
+            source_asset_id: template.type === 'income' ? null : (template.from_asset_id === rawAssetId ? assetId : null),
+            debt_id: debtId,
             category: template.category,
             date: schedule.next_run_date,
             description: template.description,
@@ -193,6 +230,9 @@ export class ProcessRecurringTask {
             schedule_id: schedule.id,
             metadata: template.metadata,
             needs_review: false,
+            // Include shares for buy/sell transactions
+            shares: (template.type === 'buy' || template.type === 'sell') ? shares : null,
+            price_per_share: (template.type === 'buy' || template.type === 'sell') ? pricePerShare : null,
           })
           .select()
           .single();
@@ -210,7 +250,7 @@ export class ProcessRecurringTask {
         console.log(`  ✓ Created transaction ${newTransaction.id.slice(0, 8)}...`);
 
         // Adjust asset balances based on transaction type
-        await this.adjustAssetBalances(template, schedule.next_run_date);
+        await this.adjustAssetBalances({ ...template, debt_id: debtId }, schedule.next_run_date);
 
         // Calculate next run date
         const nextDate = this.calculateNextRunDate(schedule.next_run_date, schedule.frequency);
@@ -262,6 +302,7 @@ export class ProcessRecurringTask {
   private async adjustAssetBalances(template: TransactionTemplate, _date: string): Promise<void> {
     const amount = template.amount;
     const txCurrency = template.currency;
+    const metadata = template.metadata as Record<string, unknown> | null;
 
     if (template.type === 'income' && template.to_asset_id) {
       // Income: add to to_asset
@@ -270,14 +311,29 @@ export class ProcessRecurringTask {
       // Expense: subtract from from_asset
       await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
     } else if (template.type === 'buy') {
-      // Buy: subtract from source (cash), add to investment
+      // Buy (invest): subtract from source (cash), add shares/units to investment
       if (template.from_asset_id) {
         await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
       }
+      // Add shares/units to investment asset
+      if (template.to_asset_id) {
+        const shares = metadata?.shares as number | undefined;
+        if (shares && shares > 0) {
+          // For stock/ETF/crypto/metals: add shares/units directly to balance
+          await this.addSharesToAsset(template.to_asset_id, shares);
+        }
+      }
     } else if (template.type === 'sell') {
-      // Sell: add to destination (cash)
+      // Sell: subtract shares from investment, add cash to destination
       if (template.to_asset_id) {
         await this.updateAssetBalance(template.to_asset_id, amount, txCurrency);
+      }
+      // Subtract shares from investment asset
+      if (template.from_asset_id) {
+        const shares = metadata?.shares as number | undefined;
+        if (shares && shares > 0) {
+          await this.addSharesToAsset(template.from_asset_id, -shares);
+        }
       }
     }
 
@@ -287,6 +343,42 @@ export class ProcessRecurringTask {
       if (template.from_asset_id) {
         await this.updateAssetBalance(template.from_asset_id, -amount, txCurrency);
       }
+    }
+  }
+
+  /**
+   * Add shares/units to an asset (for stock/ETF/crypto/metals)
+   * This updates balance directly without currency conversion
+   */
+  private async addSharesToAsset(assetId: string, shares: number): Promise<void> {
+    const { data: asset, error: fetchError } = await this.supabase
+      .from('assets')
+      .select('balance, name, type')
+      .eq('id', assetId)
+      .single();
+
+    if (fetchError || !asset) {
+      console.log(`    ⚠ Asset ${assetId.slice(0, 8)}... not found, skipping shares update`);
+      return;
+    }
+
+    const newBalance = Math.max(0, (asset.balance || 0) + shares);
+
+    const { error: updateError } = await this.supabase
+      .from('assets')
+      .update({
+        balance: newBalance,
+        balance_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', assetId);
+
+    if (updateError) {
+      console.log(`    ⚠ Failed to update asset shares: ${updateError.message}`);
+    } else {
+      const sign = shares >= 0 ? '+' : '';
+      const unit = asset.type === 'metals' ? 'units' : 'shares';
+      console.log(`    Asset ${unit} updated: ${sign}${shares} (new balance: ${newBalance}) - ${asset.name}`);
     }
   }
 

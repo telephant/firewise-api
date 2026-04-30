@@ -333,7 +333,7 @@ const updateAsset = async (req, res) => {
         const userId = req.user.id;
         const viewContext = await (0, family_context_1.getViewContext)(req);
         const { id } = req.params;
-        const { name, type, ticker, currency, market, metadata, balance } = req.body;
+        const { name, type, ticker, currency, market, metadata, balance, total_realized_pl } = req.body;
         // Fetch existing asset with current balance
         let checkQuery = supabase_1.supabaseAdmin.from('assets').select('*');
         checkQuery = (0, family_context_1.applyOwnershipFilterWithId)(checkQuery, id, viewContext);
@@ -355,6 +355,8 @@ const updateAsset = async (req, res) => {
             updates.market = market || null;
         if (metadata !== undefined)
             updates.metadata = metadata;
+        if (total_realized_pl !== undefined)
+            updates.total_realized_pl = total_realized_pl;
         // Update balance if provided
         if (balance !== undefined) {
             updates.balance = parseFloat(balance);

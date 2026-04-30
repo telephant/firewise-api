@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, buildOwnershipValues } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 
 interface FireLinkedLedger {
   id: string;
@@ -31,13 +31,13 @@ export const getFireLinkedLedgers = async (
     // Get view context for family/personal mode
     const viewContext = await getViewContext(req);
 
-    const { data: linkedLedgers, error } = await applyOwnershipFilter(
-      supabaseAdmin.from('fire_linked_ledgers').select(`
+    const { data: linkedLedgers, error } = await supabaseAdmin
+      .from('fire_linked_ledgers')
+      .select(`
         *,
         ledger:ledgers(id, name, description)
-      `),
-      viewContext
-    );
+      `)
+      .eq('belong_id', viewContext.belongId);
 
     if (error) {
       console.error('Error fetching fire linked ledgers:', error);
@@ -100,9 +100,9 @@ export const setFireLinkedLedgers = async (
     }
 
     // Insert new links with ownership values
-    const ownershipValues = buildOwnershipValues(viewContext);
     const inserts = ledger_ids.map((ledger_id: string) => ({
-      ...ownershipValues,
+      user_id: viewContext.userId,
+      belong_id: viewContext.belongId,
       ledger_id,
     }));
 

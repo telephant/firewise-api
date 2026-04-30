@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
-import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
@@ -77,7 +77,7 @@ export const getPassiveIncomeStats = async (
       .in('category', PASSIVE_INCOME_CATEGORIES)
       .gte('date', monthStart)
       .lte('date', monthEnd);
-    monthQuery = applyOwnershipFilter(monthQuery, viewContext);
+    monthQuery = monthQuery.eq('belong_id', viewContext.belongId);
 
     let annualQuery = supabaseAdmin
       .from('transactions')
@@ -85,7 +85,7 @@ export const getPassiveIncomeStats = async (
       .in('category', PASSIVE_INCOME_CATEGORIES)
       .gte('date', annualStart)
       .lte('date', annualEnd);
-    annualQuery = applyOwnershipFilter(annualQuery, viewContext);
+    annualQuery = annualQuery.eq('belong_id', viewContext.belongId);
 
     const [monthResult, annualResult] = await Promise.all([
       monthQuery,

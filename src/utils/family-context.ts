@@ -1,50 +1,45 @@
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest } from '../types';
 
-export type ViewMode = 'personal' | 'family';
-
-/**
- * Simplified ViewContext using belong_id
- * - userId: The authenticated user (creator for new records)
- * - belongId: The ownership ID (userId for personal, familyId for family)
- */
 export interface ViewContext {
-  viewMode: ViewMode;
   userId: string;
-  familyId: string | null;
-  belongId: string;  // Key field: userId for personal, familyId for family
+  familyId: string;
+  belongId: string; // always familyId
 }
 
-// Cache family membership to reduce database queries
-// Key: userId, Value: { familyId, timestamp }
-const familyCache = new Map<string, { familyId: string | null; timestamp: number }>();
-const CACHE_TTL = 60000; // 1 minute cache
+// Cache: userId → [{ family_id }]
+const familyCache = new Map<string, { families: { family_id: string }[]; timestamp: number }>();
+const CACHE_TTL = 60000;
 
 /**
- * Get the family ID for a user (with caching)
+ * Get all family IDs for a user (cached)
  */
-export async function getUserFamilyId(userId: string): Promise<string | null> {
+export async function getUserFamilies(userId: string): Promise<{ family_id: string }[]> {
   const now = Date.now();
   const cached = familyCache.get(userId);
-
-  if (cached && now - cached.timestamp < CACHE_TTL) {
-    return cached.familyId;
-  }
+  if (cached && now - cached.timestamp < CACHE_TTL) return cached.families;
 
   const { data, error } = await supabaseAdmin
     .from('family_members')
     .select('family_id')
-    .eq('user_id', userId)
-    .maybeSingle();
+    .eq('user_id', userId);
 
   if (error) {
-    console.error('Error fetching family membership:', error);
-    return null;
+    console.error('Error fetching family memberships:', error);
+    return [];
   }
 
-  const familyId = data?.family_id || null;
-  familyCache.set(userId, { familyId, timestamp: now });
-  return familyId;
+  const families = data || [];
+  familyCache.set(userId, { families, timestamp: now });
+  return families;
+}
+
+/**
+ * Get the first (personal) family ID for a user
+ */
+export async function getUserFamilyId(userId: string): Promise<string | null> {
+  const families = await getUserFamilies(userId);
+  return families[0]?.family_id ?? null;
 }
 
 /**
@@ -55,67 +50,32 @@ export function clearFamilyCache(userId: string): void {
 }
 
 /**
- * Get view context from request
- * - Determines if user is in personal or family view mode
- * - Returns belongId for simple query building
+ * Get view context from request.
+ * Reads x-family-id header. Falls back to user's first family.
+ * Throws if user has no families (should not happen after ensure-personal).
  */
 export async function getViewContext(req: AuthenticatedRequest): Promise<ViewContext> {
   const userId = req.user!.id;
-  const familyId = await getUserFamilyId(userId);
-  const headerMode = req.headers['x-view-mode'] as string;
+  const headerFamilyId = req.headers['x-family-id'] as string | undefined;
 
-  // Validate: can't use family mode if not in a family
-  let viewMode: ViewMode;
-  if (headerMode === 'family' && familyId) {
-    viewMode = 'family';
-  } else if (headerMode === 'personal') {
-    viewMode = 'personal';
+  let familyId: string;
+
+  if (headerFamilyId) {
+    // Verify user is actually a member of this family
+    const families = await getUserFamilies(userId);
+    const isMember = families.some(f => f.family_id === headerFamilyId);
+    if (!isMember) {
+      throw new Error('User is not a member of the specified family');
+    }
+    familyId = headerFamilyId;
   } else {
-    // Default: family mode if user is in a family, otherwise personal
-    viewMode = familyId ? 'family' : 'personal';
+    // Fall back to first family
+    const first = await getUserFamilyId(userId);
+    if (!first) {
+      throw new Error('User has no family. Call /fire/families/ensure-personal first.');
+    }
+    familyId = first;
   }
 
-  // belongId is the key: userId for personal, familyId for family
-  const belongId = viewMode === 'family' ? familyId! : userId;
-
-  return { viewMode, userId, familyId, belongId };
-}
-
-/**
- * Build ownership values for INSERT operations
- * - user_id: Creator (always the authenticated user)
- * - belong_id: Ownership (userId for personal, familyId for family)
- */
-export function buildOwnershipValues(ctx: ViewContext): {
-  user_id: string;
-  belong_id: string;
-} {
-  return {
-    user_id: ctx.userId,      // Always set user_id as creator
-    belong_id: ctx.belongId,  // Personal or family ownership
-  };
-}
-
-/**
- * Apply ownership filter to a Supabase query builder
- * For READ operations (SELECT)
- *
- * Simple: Just filter by belong_id!
- */
-export function applyOwnershipFilter<T extends { eq: Function }>(
-  query: T,
-  ctx: ViewContext
-): T {
-  return query.eq('belong_id', ctx.belongId);
-}
-
-/**
- * Apply ownership filter for UPDATE/DELETE operations (includes record ID check)
- */
-export function applyOwnershipFilterWithId<T extends { eq: Function }>(
-  query: T,
-  id: string,
-  ctx: ViewContext
-): T {
-  return query.eq('id', id).eq('belong_id', ctx.belongId);
+  return { userId, familyId, belongId: familyId };
 }

@@ -1,0 +1,9 @@
+{
+  "dailyTasks": [
+    "update-currency",
+    "process-recurring",
+    "check-dividends",
+    "update-growth-rates",
+    "generate-monthly-snapshot"
+  ]
+}

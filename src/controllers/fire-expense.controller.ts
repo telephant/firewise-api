@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse, Asset, Transaction } from '../types';
 import { AppError } from '../middleware/error';
-import { getViewContext, applyOwnershipFilter, applyOwnershipFilterWithId, buildOwnershipValues } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
@@ -48,7 +48,6 @@ export const createFireExpense = async (
   try {
     const userId = req.user!.id;
     const viewContext = await getViewContext(req);
-    const ownershipValues = buildOwnershipValues(viewContext);
 
     const {
       category,
@@ -82,12 +81,12 @@ export const createFireExpense = async (
     const flowDate = date || new Date().toISOString().split('T')[0];
 
     // Fetch from_asset (where expense comes from - usually cash)
-    const fromAssetQuery = applyOwnershipFilterWithId(
-      supabaseAdmin.from('assets').select('*'),
-      from_asset_id,
-      viewContext
-    );
-    const { data: fromAsset, error: fromAssetError } = await fromAssetQuery.single();
+    const { data: fromAsset, error: fromAssetError } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', from_asset_id)
+      .eq('belong_id', viewContext.belongId)
+      .single();
 
     if (fromAssetError || !fromAsset) {
       res.status(400).json({ success: false, error: 'From asset not found' });
@@ -96,12 +95,12 @@ export const createFireExpense = async (
 
     // Optionally validate flow_expense_category_id
     if (flow_expense_category_id) {
-      const categoryQuery = applyOwnershipFilterWithId(
-        supabaseAdmin.from('flow_expense_categories').select('id'),
-        flow_expense_category_id,
-        viewContext
-      );
-      const { data: expenseCategory, error: catError } = await categoryQuery.single();
+      const { data: expenseCategory, error: catError } = await supabaseAdmin
+        .from('flow_expense_categories')
+        .select('id')
+        .eq('id', flow_expense_category_id)
+        .eq('belong_id', viewContext.belongId)
+        .single();
       if (catError || !expenseCategory) {
         res.status(400).json({ success: false, error: 'Expense category not found' });
         return;
@@ -140,7 +139,7 @@ export const createFireExpense = async (
     const { data: transaction, error: txError } = await supabaseAdmin
       .from('transactions')
       .insert({
-        belong_id: ownershipValues.belong_id,
+        belong_id: viewContext.belongId,
         type: 'expense',
         category: category.trim(),
         amount: amount,

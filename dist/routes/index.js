@@ -70,6 +70,13 @@ const dividend_calendar_routes_1 = __importDefault(require("./dividend-calendar.
 const passive_income_routes_1 = __importDefault(require("./passive-income.routes"));
 const monthly_summary_routes_1 = __importDefault(require("./monthly-summary.routes"));
 const monthly_snapshot_routes_1 = __importDefault(require("./monthly-snapshot.routes"));
+const performance_routes_1 = __importDefault(require("./performance.routes"));
+const portfolio_routes_1 = __importDefault(require("./portfolio.routes"));
+const trade_routes_1 = __importDefault(require("./trade.routes"));
+const holding_routes_1 = __importDefault(require("./holding.routes"));
+const dividend_routes_1 = __importDefault(require("./dividend.routes"));
+const portfolio_stats_routes_1 = __importDefault(require("./portfolio-stats.routes"));
+const portfolio_family_routes_1 = __importDefault(require("./portfolio-family.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
@@ -110,5 +117,13 @@ router.use('/fire/dividend-calendar', dividend_calendar_routes_1.default);
 router.use('/fire/passive-income', passive_income_routes_1.default);
 router.use('/fire/monthly-summary', monthly_summary_routes_1.default);
 router.use('/fire/snapshots', monthly_snapshot_routes_1.default);
+router.use('/fire/performance', performance_routes_1.default);
+// Portfolio tracker routes
+router.use('/portfolios', portfolio_routes_1.default);
+router.use('/portfolios', trade_routes_1.default);
+router.use('/portfolios', holding_routes_1.default);
+router.use('/portfolios', dividend_routes_1.default);
+router.use('/portfolios', portfolio_stats_routes_1.default);
+router.use('/family', portfolio_family_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map

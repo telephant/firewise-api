@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
-import { getViewContext, applyOwnershipFilter } from '../utils/family-context';
+import { getViewContext } from '../utils/family-context';
 import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
@@ -99,7 +99,7 @@ export const getMonthlySummary = async (
       .gte('date', monthStart)
       .lte('date', monthEnd)
       .neq('category', 'adjustment');
-    transactionsQuery = applyOwnershipFilter(transactionsQuery, viewContext);
+    transactionsQuery = transactionsQuery.eq('belong_id', viewContext.belongId);
 
     const { data: transactions, error: transactionsError } = await transactionsQuery;
 
@@ -113,7 +113,7 @@ export const getMonthlySummary = async (
     let linkedLedgersQuery = supabaseAdmin
       .from('fire_linked_ledgers')
       .select('ledger_id, ledgers!inner(name)');
-    linkedLedgersQuery = applyOwnershipFilter(linkedLedgersQuery, viewContext);
+    linkedLedgersQuery = linkedLedgersQuery.eq('belong_id', viewContext.belongId);
 
     const { data: linkedLedgers } = await linkedLedgersQuery;
     const ledgerMap = new Map<string, string>();
@@ -209,8 +209,9 @@ export const getMonthlySummary = async (
         // Debt payment transactions
         debtPaymentTotal += amount;
         debtPaymentCount += 1;
-      } else if (t.type === 'expense') {
+      } else if (t.type === 'expense' && category !== 'transfer') {
         // Local expense (from transactions table - these are FIRE-recorded expenses)
+        // Skip internal transfers as they are not real expenses
         localExpenseTotal += amount;
         const existing = localExpenseCategoryBreakdown.get(category) || { amount: 0, count: 0 };
         localExpenseCategoryBreakdown.set(category, {
