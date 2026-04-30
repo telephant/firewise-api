@@ -17,93 +17,155 @@ import { clearFamilyCache, getUserFamilyId } from '../utils/family-context';
 import { sendFamilyInvitation } from '../services/email.service';
 
 /**
- * Get current user's family
- * GET /fire/families/me
+ * Ensure user has a personal family. Idempotent.
+ * POST /fire/families/ensure-personal
  */
-export const getMyFamily = async (
+export const ensurePersonalFamily = async (
   req: AuthenticatedRequest,
-  res: Response<ApiResponse<FamilyWithMembers | null>>
+  res: Response<ApiResponse<FamilyWithMembers>>
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      res.status(401).json({ success: false, error: 'Unauthorized' });
-      return;
-    }
+    if (!userId) { res.status(401).json({ success: false, error: 'Unauthorized' }); return; }
 
-    // Get user's family membership
-    const { data: membership, error: memberError } = await supabaseAdmin
+    // Check if user already has any family membership
+    const { data: existing } = await supabaseAdmin
       .from('family_members')
       .select('family_id')
       .eq('user_id', userId)
+      .limit(1)
       .maybeSingle();
 
-    if (memberError) throw new AppError('Failed to fetch family membership', 500);
+    if (existing) {
+      // Already has a family — fetch and return it
+      const { data: family } = await supabaseAdmin
+        .from('families')
+        .select('*')
+        .eq('id', existing.family_id)
+        .single();
 
-    if (!membership) {
-      res.json({ success: true, data: null });
+      const { data: members } = await supabaseAdmin
+        .from('family_members')
+        .select('id, family_id, user_id, role, joined_at')
+        .eq('family_id', existing.family_id);
+
+      const userIds = (members || []).map((m: any) => m.user_id);
+      const { data: profiles } = await supabaseAdmin
+        .from('profiles')
+        .select('id, full_name, email, avatar_url')
+        .in('id', userIds);
+
+      const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
+      const transformedMembers = (members || []).map((m: any) => ({
+        ...m,
+        profile: profileMap.get(m.user_id),
+      }));
+
+      res.json({ success: true, data: { ...family, members: transformedMembers } });
       return;
     }
 
-    // Get family with members
-    const { data: family, error: familyError } = await supabaseAdmin
-      .from('families')
-      .select('*')
-      .eq('id', membership.family_id)
+    // Create personal family
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('full_name, email')
+      .eq('id', userId)
       .single();
 
-    if (familyError) throw new AppError('Failed to fetch family', 500);
+    const displayName = profile?.full_name || profile?.email?.split('@')[0] || 'My';
+    const familyName = `${displayName}'s Space`;
 
-    // Get all members
-    const { data: members, error: membersError } = await supabaseAdmin
+    const { data: newFamily, error: familyError } = await supabaseAdmin
+      .from('families')
+      .insert({ name: familyName, owner_id: userId })
+      .select()
+      .single();
+
+    if (familyError || !newFamily) throw new AppError('Failed to create family', 500);
+
+    await supabaseAdmin
       .from('family_members')
-      .select('id, family_id, user_id, joined_at')
-      .eq('family_id', membership.family_id);
+      .insert({ family_id: newFamily.id, user_id: userId, role: 'owner' });
+
+    clearFamilyCache(userId);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        ...newFamily,
+        members: [{
+          id: '',
+          family_id: newFamily.id,
+          user_id: userId,
+          role: 'owner' as const,
+          joined_at: new Date().toISOString(),
+        }],
+      },
+    });
+  } catch (err) {
+    if (err instanceof AppError) { res.status(err.statusCode).json({ success: false, error: err.message }); return; }
+    res.status(500).json({ success: false, error: 'Failed to ensure personal family' });
+  }
+};
+
+/**
+ * Get all families the current user belongs to
+ * GET /fire/families/me
+ */
+export const getMyFamilies = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<FamilyWithMembers[]>>
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false, error: 'Unauthorized' }); return; }
+
+    const { data: memberships, error: memberError } = await supabaseAdmin
+      .from('family_members')
+      .select('family_id')
+      .eq('user_id', userId);
+
+    if (memberError) throw new AppError('Failed to fetch family memberships', 500);
+    if (!memberships || memberships.length === 0) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const familyIds = memberships.map((m: any) => m.family_id);
+
+    const { data: families, error: familiesError } = await supabaseAdmin
+      .from('families')
+      .select('*')
+      .in('id', familyIds);
+
+    if (familiesError) throw new AppError('Failed to fetch families', 500);
+
+    const { data: allMembers, error: membersError } = await supabaseAdmin
+      .from('family_members')
+      .select('id, family_id, user_id, role, joined_at')
+      .in('family_id', familyIds);
 
     if (membersError) throw new AppError('Failed to fetch family members', 500);
 
-    // Get profiles for all members
-    const userIds = (members || []).map((m: any) => m.user_id);
-    const { data: profiles, error: profilesError } = await supabaseAdmin
+    const userIds = [...new Set((allMembers || []).map((m: any) => m.user_id))];
+    const { data: profiles } = await supabaseAdmin
       .from('profiles')
       .select('id, full_name, email, avatar_url')
       .in('id', userIds);
 
-    if (profilesError) {
-      console.error('Error fetching profiles:', profilesError);
-    }
-
-    // Create a map of user_id to profile
     const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
 
-    // Transform members data
-    const transformedMembers: FamilyMember[] = (members || []).map((m: any) => {
-      const profile = profileMap.get(m.user_id);
-      return {
-        id: m.id,
-        family_id: m.family_id,
-        user_id: m.user_id,
-        role: m.role,
-        joined_at: m.joined_at,
-        profile: profile ? {
-          full_name: profile.full_name,
-          email: profile.email,
-          avatar_url: profile.avatar_url,
-        } : undefined,
-      };
+    const result: FamilyWithMembers[] = (families || []).map((family: any) => {
+      const members = (allMembers || [])
+        .filter((m: any) => m.family_id === family.id)
+        .map((m: any) => ({ ...m, profile: profileMap.get(m.user_id) }));
+      return { ...family, members };
     });
 
-    res.json({
-      success: true,
-      data: {
-        ...family,
-        members: transformedMembers,
-      },
-    });
+    res.json({ success: true, data: result });
   } catch (err) {
-    if (err instanceof AppError) throw err;
-    console.error('Error in getMyFamily:', err);
-    res.status(500).json({ success: false, error: 'Failed to get family' });
+    if (err instanceof AppError) { res.status(err.statusCode).json({ success: false, error: err.message }); return; }
+    res.status(500).json({ success: false, error: 'Failed to fetch families' });
   }
 };
 
@@ -891,6 +953,7 @@ export const acceptInvitation = async (
       .insert({
         family_id: invitation.family_id,
         user_id: userId,
+        role: 'member',
       });
 
     if (memberError) {

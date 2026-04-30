@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import {
-  getMyFamily,
+  getMyFamilies,
+  ensurePersonalFamily,
   createFamily,
   updateFamily,
   deleteFamily,
@@ -20,7 +21,8 @@ import {
 const router = Router();
 
 // Family management (all require auth)
-router.get('/me', authMiddleware, getMyFamily);
+router.get('/me', authMiddleware, getMyFamilies);
+router.post('/ensure-personal', authMiddleware, ensurePersonalFamily);
 router.post('/', authMiddleware, createFamily);
 router.put('/:id', authMiddleware, updateFamily);
 router.delete('/:id', authMiddleware, deleteFamily);
