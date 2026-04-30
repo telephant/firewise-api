@@ -331,7 +331,7 @@ export interface ProcessRecurringResult {
 export interface Family {
   id: string;
   name: string;
-  created_by: string;
+  owner_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -340,6 +340,7 @@ export interface FamilyMember {
   id: string;
   family_id: string;
   user_id: string;
+  role: 'owner' | 'member';
   joined_at: string;
   // Joined profile data
   profile?: {

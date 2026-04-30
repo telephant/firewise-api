@@ -83,6 +83,7 @@ export const getMyFamily = async (
         id: m.id,
         family_id: m.family_id,
         user_id: m.user_id,
+        role: m.role,
         joined_at: m.joined_at,
         profile: profile ? {
           full_name: profile.full_name,
@@ -140,7 +141,7 @@ export const createFamily = async (
       .from('families')
       .insert({
         name: name.trim(),
-        created_by: userId,
+        owner_id: userId,
       })
       .select()
       .single();
@@ -210,11 +211,11 @@ export const updateFamily = async (
       .from('families')
       .select('*')
       .eq('id', id)
-      .eq('created_by', userId)
+      .eq('owner_id', userId)
       .single();
 
     if (checkError || !family) {
-      res.status(403).json({ success: false, error: 'Only the family creator can update it' });
+      res.status(403).json({ success: false, error: 'Only the family owner can update it' });
       return;
     }
 
@@ -258,11 +259,11 @@ export const deleteFamily = async (
       .from('families')
       .select('*')
       .eq('id', id)
-      .eq('created_by', userId)
+      .eq('owner_id', userId)
       .single();
 
     if (checkError || !family) {
-      res.status(403).json({ success: false, error: 'Only the family creator can delete it' });
+      res.status(403).json({ success: false, error: 'Only the family owner can delete it' });
       return;
     }
 
@@ -344,6 +345,7 @@ export const getFamilyMembers = async (
         id: m.id,
         family_id: m.family_id,
         user_id: m.user_id,
+        role: m.role,
         joined_at: m.joined_at,
         profile: profile ? {
           full_name: profile.full_name,
@@ -383,11 +385,11 @@ export const removeFamilyMember = async (
       .from('families')
       .select('*')
       .eq('id', id)
-      .eq('created_by', currentUserId)
+      .eq('owner_id', currentUserId)
       .single();
 
     if (checkError || !family) {
-      res.status(403).json({ success: false, error: 'Only the family creator can remove members' });
+      res.status(403).json({ success: false, error: 'Only the family owner can remove members' });
       return;
     }
 
@@ -447,14 +449,14 @@ export const leaveFamily = async (
       return;
     }
 
-    // Check if user is the creator
+    // Check if user is the owner
     const { data: family } = await supabaseAdmin
       .from('families')
-      .select('created_by')
+      .select('owner_id')
       .eq('id', id)
       .single();
 
-    if (family?.created_by === userId) {
+    if (family?.owner_id === userId) {
       // If creator is leaving, check if there are other members
       const { count } = await supabaseAdmin
         .from('family_members')
