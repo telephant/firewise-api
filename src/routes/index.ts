@@ -38,7 +38,6 @@ import tradeRoutes from './trade.routes';
 import holdingRoutes from './holding.routes';
 import dividendRoutes from './dividend.routes';
 import portfolioStatsRoutes from './portfolio-stats.routes';
-import portfolioFamilyRoutes from './portfolio-family.routes';
 import exchangeRateRoutes from './exchange-rate.routes';
 import realizedPlRoutes from './realized-pl.routes';
 
@@ -97,6 +96,5 @@ router.use('/portfolios', dividendRoutes);
 router.use('/portfolios', portfolioStatsRoutes);
 router.use('/exchange-rates', exchangeRateRoutes);
 router.use('/portfolios', realizedPlRoutes);
-router.use('/family', portfolioFamilyRoutes);
 
 export default router;

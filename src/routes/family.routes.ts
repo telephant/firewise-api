@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import {
-  getMyFamilies,
   ensurePersonalFamily,
+  getMyFamilies,
   createFamily,
   updateFamily,
   deleteFamily,
@@ -15,14 +15,17 @@ import {
   cancelInvitation,
   getInvitation,
   acceptInvitation,
-  migrateDataToFamily,
 } from '../controllers/family.controller';
 
 const router = Router();
 
-// Family management (all require auth)
-router.get('/me', authMiddleware, getMyFamilies);
+// Ensure personal family exists (idempotent, call on login)
 router.post('/ensure-personal', authMiddleware, ensurePersonalFamily);
+
+// Get all families the user belongs to
+router.get('/me', authMiddleware, getMyFamilies);
+
+// Family management
 router.post('/', authMiddleware, createFamily);
 router.put('/:id', authMiddleware, updateFamily);
 router.delete('/:id', authMiddleware, deleteFamily);
@@ -38,16 +41,8 @@ router.get('/:id/invitations', authMiddleware, getPendingInvitations);
 router.post('/:id/invitations/:invitationId/resend', authMiddleware, resendInvitation);
 router.delete('/:id/invitations/:invitationId', authMiddleware, cancelInvitation);
 
-// Data migration
-router.post('/:id/migrate-data', authMiddleware, migrateDataToFamily);
-
 export default router;
 
-// Separate router for invitation acceptance (different path)
 export const invitationRouter = Router();
-
-// Get invitation details (can be viewed before login)
 invitationRouter.get('/:token', getInvitation);
-
-// Accept invitation (requires auth)
 invitationRouter.post('/:token/accept', authMiddleware, acceptInvitation);
