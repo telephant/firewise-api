@@ -216,6 +216,7 @@ export const createFamily = async (
       .insert({
         family_id: family.id,
         user_id: userId,
+        role: 'owner',
       });
 
     if (memberError) {
