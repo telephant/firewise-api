@@ -456,8 +456,6 @@ interface DebtTransactionRequest {
   // For pay
   debt_id?: string;
   from_asset_id?: string; // Cash account for payment
-  recurring_frequency?: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly'; // For recurring payments
-
   // Common
   amount: number;
   currency?: string;
@@ -471,7 +469,6 @@ interface DebtTransactionResult {
   debt: Debt;
   from_asset?: Asset;
   to_asset?: Asset;
-  schedule_id?: string;
 }
 
 export const createDebtTransaction = async (
@@ -495,7 +492,6 @@ export const createDebtTransaction = async (
       disburse_to_asset_id,
       debt_id,
       from_asset_id,
-      recurring_frequency,
       amount,
       currency = 'USD',
       date,
@@ -732,75 +728,12 @@ export const createDebtTransaction = async (
         throw new AppError('Failed to log payment', 500);
       }
 
-      // Create recurring schedule if frequency is set
-      let scheduleId: string | undefined;
-      console.log('[DebtPayment] recurring_frequency:', recurring_frequency);
-      if (recurring_frequency) {
-        // Calculate next run date based on frequency
-        const nextDate = new Date(flowDate);
-        switch (recurring_frequency) {
-          case 'weekly':
-            nextDate.setDate(nextDate.getDate() + 7);
-            break;
-          case 'biweekly':
-            nextDate.setDate(nextDate.getDate() + 14);
-            break;
-          case 'monthly':
-            nextDate.setMonth(nextDate.getMonth() + 1);
-            break;
-          case 'quarterly':
-            nextDate.setMonth(nextDate.getMonth() + 3);
-            break;
-          case 'yearly':
-            nextDate.setFullYear(nextDate.getFullYear() + 1);
-            break;
-        }
-
-        const { data: schedule, error: scheduleError } = await supabaseAdmin
-          .from('recurring_schedules')
-          .insert({
-            ...ownershipValues,
-            source_transaction_id: transaction.id,
-            frequency: recurring_frequency,
-            next_run_date: nextDate.toISOString().split('T')[0],
-            is_active: true,
-            transaction_template: {
-              type: 'debt_payment',
-              amount: amount,
-              currency: currency,
-              from_asset_id: from_asset_id || null,
-              to_asset_id: null,
-              debt_id: debt_id,
-              category: 'pay_debt',
-              description: description || `Payment to ${debt.name}`,
-              expense_category_id: null,
-              metadata: metadata || null,
-            },
-          })
-          .select()
-          .single();
-
-        if (scheduleError) {
-          console.error('[DebtPayment] Failed to create recurring schedule:', scheduleError);
-          console.error('[DebtPayment] Schedule data was:', {
-            ...ownershipValues,
-            frequency: recurring_frequency,
-            next_run_date: nextDate.toISOString().split('T')[0],
-          });
-          // Don't fail the whole request, just log the error
-        } else {
-          console.log('[DebtPayment] Created recurring schedule:', schedule?.id);
-          scheduleId = schedule?.id;
-        }
-      }
-
       res.status(201).json({
         success: true,
         data: {
           transaction_id: transaction.id,
           debt: updatedDebt,
           from_asset: fromAsset,
-          schedule_id: scheduleId,
         },
       });
     }

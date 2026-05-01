@@ -287,46 +287,6 @@ export interface UserPreferences {
   updated_at: string;
 }
 
-// Recurring Schedule types
-export type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
-
-export interface TransactionTemplate {
-  type: TransactionType;
-  amount: number;
-  currency: string;
-  from_asset_id: string | null;
-  to_asset_id: string | null;
-  debt_id: string | null;
-  category: string | null;
-  description: string | null;
-  expense_category_id: string | null;
-  metadata: Record<string, unknown> | null;
-}
-
-export interface RecurringSchedule {
-  id: string;
-  user_id: string;
-  source_transaction_id: string | null;
-  frequency: ScheduleFrequency;
-  next_run_date: string;
-  last_run_date: string | null;
-  is_active: boolean;
-  transaction_template: TransactionTemplate;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface RecurringScheduleFilters extends PaginationParams {
-  is_active?: boolean;
-  frequency?: ScheduleFrequency;
-}
-
-export interface ProcessRecurringResult {
-  processed: number;
-  created_transactions: string[];
-  errors: { schedule_id: string; error: string }[];
-}
-
 // Family sharing types
 export interface Family {
   id: string;

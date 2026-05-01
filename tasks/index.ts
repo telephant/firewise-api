@@ -8,7 +8,6 @@
  * - run-all: Run configured tasks in sequence (see DAILY_TASKS env or tasks.config.json)
  * - update-currency: Fetch and update exchange rates from external API
  * - check-dividends: Check for dividend payments and create flows
- * - process-recurring: Process due recurring schedules and create flows
  * - update-growth-rates: Fetch 5yr/10yr growth rates for assets with tickers
  * - generate-monthly-snapshot: Generate monthly financial snapshots for all users
  * - dividend-sync: Sync dividends from yfinance into the dividends table
@@ -16,7 +15,7 @@
  * - price-cache-cleanup: Delete price_cache records older than 7 days
  *
  * Configuration:
- * - Set DAILY_TASKS env var: DAILY_TASKS=update-currency,process-recurring,check-dividends
+ * - Set DAILY_TASKS env var: DAILY_TASKS=update-currency,process-dca,check-dividends
  * - Or create tasks/tasks.config.json with: { "dailyTasks": ["update-currency", ...] }
  */
 
@@ -34,7 +33,6 @@ if (fs.existsSync(taskEnvPath)) {
 
 import { UpdateCurrencyTask } from './update-currency.task';
 import { CheckDividendsTask } from './check-dividends.task';
-import { ProcessRecurringTask } from './process-recurring.task';
 import { UpdateGrowthRatesTask } from './update-growth-rates.task';
 import { GenerateMonthlySnapshotTask } from './generate-monthly-snapshot.task';
 import { DividendSyncTask } from './dividend-sync.task';
@@ -78,7 +76,6 @@ function loadDailyTasksConfig(): string[] {
 const TASK_FACTORY: Record<string, () => { run: () => Promise<void> }> = {
   'update-currency': () => new UpdateCurrencyTask(),
   'check-dividends': () => new CheckDividendsTask(),
-  'process-recurring': () => new ProcessRecurringTask(),
   'update-growth-rates': () => new UpdateGrowthRatesTask(),
   'generate-monthly-snapshot': () => new GenerateMonthlySnapshotTask(),
   'dividend-sync': () => new DividendSyncTask(),
@@ -127,7 +124,6 @@ const TASKS: Record<string, () => Promise<void>> = {
   'run-all': runAllTasks,
   'update-currency': () => new UpdateCurrencyTask().run(),
   'check-dividends': () => new CheckDividendsTask().run(),
-  'process-recurring': () => new ProcessRecurringTask().run(),
   'update-growth-rates': () => new UpdateGrowthRatesTask().run(),
   'generate-monthly-snapshot': () => new GenerateMonthlySnapshotTask().run(),
   'dividend-sync': () => new DividendSyncTask().run(),

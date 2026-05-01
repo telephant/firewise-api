@@ -1002,7 +1002,7 @@ export const acceptInvitation = async (
  */
 export const migrateDataToFamily = async (
   req: AuthenticatedRequest,
-  res: Response<ApiResponse<{ migrated: { assets: number; flows: number; debts: number; schedules: number; categories: number } }>>
+  res: Response<ApiResponse<{ migrated: MigrationResult }>>
 ): Promise<void> => {
   try {
     const userId = req.user?.id;
@@ -1043,7 +1043,6 @@ interface MigrationResult {
   assets: number;
   flows: number;
   debts: number;
-  schedules: number;
   categories: number;
   linkedLedgers: number;
   cashBalancesByCurrency: Record<string, number>;
@@ -1057,7 +1056,6 @@ async function migrateUserDataToFamily(
     assets: 0,
     flows: 0,
     debts: 0,
-    schedules: 0,
     categories: 0,
     linkedLedgers: 0,
     cashBalancesByCurrency: {},
@@ -1135,15 +1133,6 @@ async function migrateUserDataToFamily(
     .select('id');
   if (debtsError) console.error('[Family] Debts migration error:', debtsError);
   results.debts = debtsData?.length || 0;
-
-  // Migrate recurring schedules
-  const { data: schedulesData, error: schedulesError } = await supabaseAdmin
-    .from('recurring_schedules')
-    .update({ belong_id: familyId })
-    .eq('belong_id', userId)
-    .select('id');
-  if (schedulesError) console.error('[Family] Schedules migration error:', schedulesError);
-  results.schedules = schedulesData?.length || 0;
 
   // Migrate flow expense categories
   const { data: categoriesData, error: categoriesError } = await supabaseAdmin

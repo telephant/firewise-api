@@ -1,7 +1,7 @@
 {
   "dailyTasks": [
     "update-currency",
-    "process-recurring",
+    "process-dca",
     "check-dividends",
     "update-growth-rates",
     "generate-monthly-snapshot"
