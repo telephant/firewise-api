@@ -13,6 +13,7 @@
  * - dividend-sync: Sync dividends from yfinance into the dividends table
  * - portfolio-snapshot: Generate month-end portfolio snapshots (use --month=YYYY-MM to override)
  * - price-cache-cleanup: Delete price_cache records older than 7 days
+ * - process-dca: Generate pending DCA confirmation records for due plans
  *
  * Configuration:
  * - Set DAILY_TASKS env var: DAILY_TASKS=update-currency,process-dca,check-dividends
@@ -38,6 +39,7 @@ import { GenerateMonthlySnapshotTask } from './generate-monthly-snapshot.task';
 import { DividendSyncTask } from './dividend-sync.task';
 import { PortfolioSnapshotTask } from './portfolio-snapshot.task';
 import { PriceCacheCleanupTask } from './price-cache-cleanup.task';
+import { ProcessDcaTask } from './process-dca.task';
 
 /**
  * Load task configuration from env or config file
@@ -81,6 +83,7 @@ const TASK_FACTORY: Record<string, () => { run: () => Promise<void> }> = {
   'dividend-sync': () => new DividendSyncTask(),
   'portfolio-snapshot': () => new PortfolioSnapshotTask(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask(),
+  'process-dca': () => new ProcessDcaTask(),
 };
 
 /**
@@ -129,6 +132,7 @@ const TASKS: Record<string, () => Promise<void>> = {
   'dividend-sync': () => new DividendSyncTask().run(),
   'portfolio-snapshot': () => new PortfolioSnapshotTask().run(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask().run(),
+  'process-dca': () => new ProcessDcaTask().run(),
 };
 
 async function main() {
