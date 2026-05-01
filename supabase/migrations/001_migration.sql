@@ -607,3 +607,65 @@ CREATE POLICY "Authenticated users can read price cache"
   USING (auth.role() = 'authenticated');
 
 CREATE INDEX IF NOT EXISTS idx_price_cache_ticker_date ON price_cache(ticker, date);
+
+
+-- ── 18. DCA Plans ─────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS dca_plans (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  portfolio_id    UUID NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  ticker          TEXT NOT NULL,
+  market          TEXT NOT NULL CHECK (market IN ('US', 'SGX', 'HK', 'CN')),
+  currency        TEXT NOT NULL,
+  frequency       TEXT NOT NULL CHECK (frequency IN ('weekly', 'biweekly', 'monthly', 'quarterly', 'yearly')),
+  mode            TEXT NOT NULL CHECK (mode IN ('amount', 'shares')),
+  amount          DECIMAL(18,8),
+  shares          DECIMAL(18,8),
+  next_run_date   DATE NOT NULL,
+  last_run_date   DATE,
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  notes           TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE dca_plans ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "dca_plans_access" ON dca_plans
+  USING (portfolio_id IN (
+    SELECT id FROM portfolios
+    WHERE belong_id = auth.uid()
+       OR belong_id IN (SELECT family_id FROM family_members WHERE user_id = auth.uid())
+  ));
+
+
+-- ── 19. DCA Pending ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS dca_pending (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dca_plan_id       UUID NOT NULL REFERENCES dca_plans(id) ON DELETE CASCADE,
+  portfolio_id      UUID NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  ticker            TEXT NOT NULL,
+  market            TEXT NOT NULL,
+  currency          TEXT NOT NULL,
+  scheduled_date    DATE NOT NULL,
+  mode              TEXT NOT NULL CHECK (mode IN ('amount', 'shares')),
+  amount            DECIMAL(18,8),
+  shares            DECIMAL(18,8),
+  suggested_price   DECIMAL(18,8),
+  suggested_shares  DECIMAL(18,8),
+  status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'skipped')),
+  confirmed_price   DECIMAL(18,8),
+  confirmed_shares  DECIMAL(18,8),
+  trade_id          UUID REFERENCES trades(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE dca_pending ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "dca_pending_access" ON dca_pending
+  USING (portfolio_id IN (
+    SELECT id FROM portfolios
+    WHERE belong_id = auth.uid()
+       OR belong_id IN (SELECT family_id FROM family_members WHERE user_id = auth.uid())
+  ));
