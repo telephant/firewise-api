@@ -7,9 +7,6 @@
  * Available tasks:
  * - run-all: Run configured tasks in sequence (see DAILY_TASKS env or tasks.config.json)
  * - update-currency: Fetch and update exchange rates from external API
- * - check-dividends: Check for dividend payments and create flows
- * - update-growth-rates: Fetch 5yr/10yr growth rates for assets with tickers
- * - generate-monthly-snapshot: Generate monthly financial snapshots for all users
  * - dividend-sync: Sync dividends from yfinance into the dividends table
  * - portfolio-snapshot: Generate month-end portfolio snapshots (use --month=YYYY-MM to override)
  * - price-cache-cleanup: Delete price_cache records older than 7 days
@@ -33,9 +30,6 @@ if (fs.existsSync(taskEnvPath)) {
 }
 
 import { UpdateCurrencyTask } from './update-currency.task';
-import { CheckDividendsTask } from './check-dividends.task';
-import { UpdateGrowthRatesTask } from './update-growth-rates.task';
-import { GenerateMonthlySnapshotTask } from './generate-monthly-snapshot.task';
 import { DividendSyncTask } from './dividend-sync.task';
 import { PortfolioSnapshotTask } from './portfolio-snapshot.task';
 import { PriceCacheCleanupTask } from './price-cache-cleanup.task';
@@ -77,9 +71,6 @@ function loadDailyTasksConfig(): string[] {
 // Task factory map
 const TASK_FACTORY: Record<string, () => { run: () => Promise<void> }> = {
   'update-currency': () => new UpdateCurrencyTask(),
-  'check-dividends': () => new CheckDividendsTask(),
-  'update-growth-rates': () => new UpdateGrowthRatesTask(),
-  'generate-monthly-snapshot': () => new GenerateMonthlySnapshotTask(),
   'dividend-sync': () => new DividendSyncTask(),
   'portfolio-snapshot': () => new PortfolioSnapshotTask(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask(),
@@ -126,9 +117,6 @@ async function runAllTasks(): Promise<void> {
 const TASKS: Record<string, () => Promise<void>> = {
   'run-all': runAllTasks,
   'update-currency': () => new UpdateCurrencyTask().run(),
-  'check-dividends': () => new CheckDividendsTask().run(),
-  'update-growth-rates': () => new UpdateGrowthRatesTask().run(),
-  'generate-monthly-snapshot': () => new GenerateMonthlySnapshotTask().run(),
   'dividend-sync': () => new DividendSyncTask().run(),
   'portfolio-snapshot': () => new PortfolioSnapshotTask().run(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask().run(),
