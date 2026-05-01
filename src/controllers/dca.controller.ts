@@ -53,12 +53,21 @@ async function getPortfolioIds(belongId: string): Promise<string[]> {
 
 function advanceDate(date: string, frequency: DcaPlan['frequency']): string {
   const d = new Date(date);
+  const originalDay = d.getDate();
+
   switch (frequency) {
-    case 'weekly':    d.setDate(d.getDate() + 7); break;
-    case 'biweekly':  d.setDate(d.getDate() + 14); break;
-    case 'monthly':   d.setMonth(d.getMonth() + 1); break;
-    case 'quarterly': d.setMonth(d.getMonth() + 3); break;
-    case 'yearly':    d.setFullYear(d.getFullYear() + 1); break;
+    case 'weekly':   d.setDate(d.getDate() + 7); break;
+    case 'biweekly': d.setDate(d.getDate() + 14); break;
+    case 'monthly':
+    case 'quarterly':
+    case 'yearly': {
+      const months = frequency === 'monthly' ? 1 : frequency === 'quarterly' ? 3 : 12;
+      d.setDate(1); // anchor to 1st to avoid overflow during month change
+      d.setMonth(d.getMonth() + months);
+      const daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(originalDay, daysInMonth));
+      break;
+    }
   }
   return d.toISOString().split('T')[0];
 }
@@ -171,6 +180,14 @@ export const updatePlan = async (
     if (!existing) throw new AppError('DCA plan not found', 404);
 
     const { frequency, mode, amount, shares, next_run_date, is_active, notes } = req.body;
+
+    if (frequency !== undefined && !['weekly', 'biweekly', 'monthly', 'quarterly', 'yearly'].includes(frequency)) {
+      throw new AppError('frequency must be weekly, biweekly, monthly, quarterly, or yearly', 400);
+    }
+    if (mode !== undefined && !['amount', 'shares'].includes(mode)) {
+      throw new AppError('mode must be amount or shares', 400);
+    }
+
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (frequency !== undefined) updates.frequency = frequency;
     if (mode !== undefined) updates.mode = mode;
