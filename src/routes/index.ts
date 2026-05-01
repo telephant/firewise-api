@@ -39,6 +39,7 @@ import dividendRoutes from './dividend.routes';
 import portfolioStatsRoutes from './portfolio-stats.routes';
 import exchangeRateRoutes from './exchange-rate.routes';
 import realizedPlRoutes from './realized-pl.routes';
+import dcaRoutes from './dca.routes';
 
 const router = Router();
 
@@ -87,6 +88,7 @@ router.use('/fire/snapshots', monthlySnapshotRoutes);
 router.use('/fire/performance', performanceRoutes);
 
 // Portfolio tracker routes
+router.use('/fire/dca', dcaRoutes);
 router.use('/portfolios', portfolioRoutes);
 router.use('/portfolios', tradeRoutes);
 router.use('/portfolios', holdingRoutes);
