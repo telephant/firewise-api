@@ -11,10 +11,14 @@
     "test:watch": "jest --watch ",
     "test:connection": "jest --testMatch='**/supabase.connection.test.ts' --setupFiles='' --verbose",
     "task": "ts-node tasks/index.ts",
+    "task:daily": "ts-node tasks/index.ts run-daily",
+    "task:weekly": "ts-node tasks/index.ts run-weekly",
+    "task:monthly": "ts-node tasks/index.ts run-monthly",
     "task:update-currency": "ts-node tasks/index.ts update-currency",
-    "task:check-dividends": "ts-node tasks/index.ts check-dividends",
     "task:dca": "ts-node tasks/index.ts process-dca",
-    "task:monthly-snapshot": "ts-node tasks/index.ts generate-monthly-snapshot"
+    "task:dividend-sync": "ts-node tasks/index.ts dividend-sync",
+    "task:price-cleanup": "ts-node tasks/index.ts price-cache-cleanup",
+    "task:portfolio-snapshot": "ts-node tasks/index.ts portfolio-snapshot"
   },
   "keywords": [],
   "author": "",
