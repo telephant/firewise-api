@@ -13,7 +13,7 @@
     "task": "ts-node tasks/index.ts",
     "task:update-currency": "ts-node tasks/index.ts update-currency",
     "task:check-dividends": "ts-node tasks/index.ts check-dividends",
-    "task:recurring": "ts-node tasks/index.ts process-recurring",
+    "task:dca": "ts-node tasks/index.ts process-dca",
     "task:monthly-snapshot": "ts-node tasks/index.ts generate-monthly-snapshot"
   },
   "keywords": [],
