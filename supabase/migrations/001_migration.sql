@@ -29,7 +29,8 @@ BEGIN
         'expense_categories','payment_methods','expenses',
         'currency_exchange','feedback',
         'families','family_members','family_invitations',
-        'portfolios','trades','dividends','portfolio_snapshots','price_cache'
+        'portfolios','trades','dividends','portfolio_snapshots','price_cache',
+        'dca_plans','dca_pending'
       )
   LOOP
     EXECUTE format('DROP POLICY IF EXISTS %I ON %I', r.policyname, r.tablename);
@@ -200,7 +201,7 @@ CREATE POLICY "Users can delete currencies in their ledgers"
 
 -- Now add the FK from ledgers → ledger_currencies
 ALTER TABLE ledgers
-  ADD CONSTRAINT fk_ledgers_default_currency
+  ADD CONSTRAINT IF NOT EXISTS fk_ledgers_default_currency
   FOREIGN KEY (default_currency_id) REFERENCES ledger_currencies(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_ledger_currencies_ledger ON ledger_currencies(ledger_id);
