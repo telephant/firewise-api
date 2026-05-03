@@ -51,10 +51,8 @@ interface AnalyticsResponse {
 
 async function fetchDailyHistory(ticker: string, market: string): Promise<MonthlyPrice[]> {
   if (market === 'COMMODITY') return [];
-  let yticker = ticker;
-  if (market === 'SGX') yticker = `${ticker}.SI`;
-  else if (market === 'HK') yticker = `${ticker}.HK`;
-  else if (market === 'CN') yticker = `${ticker}.SS`;
+  // Tickers are already stored with exchange suffixes (e.g. D05.SI, 0700.HK)
+  const yticker = ticker;
   try {
     const url = `${FINDATA_BASE_URL}/stock/history/${encodeURIComponent(yticker)}?period=1y&interval=1d`;
     const res = await fetch(url);
