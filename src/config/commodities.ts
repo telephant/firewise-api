@@ -6,15 +6,18 @@ export interface CommodityConfig {
   currency: string;
 }
 
-export const COMMODITY_CONFIG: Record<string, CommodityConfig> = {
-  'GC=F': { name: 'Gold',        unit: 'troy_oz', currency: 'USD' },
-  'SI=F': { name: 'Silver',      unit: 'troy_oz', currency: 'USD' },
-  'PL=F': { name: 'Platinum',    unit: 'troy_oz', currency: 'USD' },
-  'CL=F': { name: 'Crude Oil',   unit: 'barrel',  currency: 'USD' },
+export const COMMODITY_TICKERS = ['GC=F', 'SI=F', 'PL=F', 'CL=F'] as const;
+export type CommodityTicker = typeof COMMODITY_TICKERS[number];
+
+export const COMMODITY_CONFIG: Record<CommodityTicker, CommodityConfig> = {
+  'GC=F': { name: 'Gold',      unit: 'troy_oz', currency: 'USD' },
+  'SI=F': { name: 'Silver',    unit: 'troy_oz', currency: 'USD' },
+  'PL=F': { name: 'Platinum',  unit: 'troy_oz', currency: 'USD' },
+  'CL=F': { name: 'Crude Oil', unit: 'barrel',  currency: 'USD' },
 };
 
-export const COMMODITY_TICKERS = Object.keys(COMMODITY_CONFIG);
-
+// UNIT_LABELS includes all possible units; entries beyond troy_oz/barrel
+// are reserved for future commodity types.
 export const UNIT_LABELS: Record<CommodityUnit, string> = {
   troy_oz: 'troy oz',
   barrel:  'barrel',

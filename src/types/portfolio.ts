@@ -20,7 +20,7 @@ export interface Trade {
   date: string;
   notes: string | null;
   created_at: string;
-  asset_type: 'stock' | 'commodity';
+  asset_type: 'stock' | 'commodity'; // DB default 'stock'; required in create payload for commodity trades
   unit: string | null;
 }
 
