@@ -12,7 +12,7 @@ export interface Trade {
   id: string;
   portfolio_id: string;
   ticker: string;
-  market: 'US' | 'SGX' | 'HK' | 'CN';
+  market: 'US' | 'SGX' | 'HK' | 'CN' | 'COMMODITY';
   type: 'buy' | 'sell';
   shares: number;
   price: number;
@@ -20,6 +20,8 @@ export interface Trade {
   date: string;
   notes: string | null;
   created_at: string;
+  asset_type: 'stock' | 'commodity';
+  unit: string | null;
 }
 
 export interface Holding {
