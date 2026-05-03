@@ -123,6 +123,7 @@ export const createTrade = async (
       .single();
 
     if (error || !data) {
+      console.error('createTrade DB error:', error);
       throw new AppError('Failed to create trade', 500);
     }
 
