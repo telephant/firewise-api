@@ -297,10 +297,16 @@ export const getAnalytics = async (
 
     const portfolioReturns = computePortfolioReturns(histories);
 
-    // Fetch SPY benchmark history
+    // Fetch SPY benchmark history and compute returns directly
     const spyPrices = await fetchMonthlyHistory('SPY', 'US');
-    const spyHistories = [{ weight: 1, prices: spyPrices }];
-    const spyReturns = computePortfolioReturns(spyHistories);
+    const spyReturns: number[] = [];
+    for (let i = 1; i < spyPrices.length; i++) {
+      const prev = spyPrices[i - 1];
+      const curr = spyPrices[i];
+      if (prev.close && curr.close && prev.close > 0) {
+        spyReturns.push((curr.close - prev.close) / prev.close);
+      }
+    }
     const { beta, alpha_annual, r_squared } = calcBetaAlpha(portfolioReturns, spyReturns);
 
     // Concentration metrics
