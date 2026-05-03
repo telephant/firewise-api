@@ -83,7 +83,7 @@ function computePortfolioReturns(histories: { weight: number; prices: MonthlyPri
         weightUsed += weight;
       }
     }
-    if (weightUsed > 0.7) returns.push(portfolioReturn / weightUsed);
+    if (weightUsed > 0.1) returns.push(portfolioReturn / weightUsed);
   }
   return returns;
 }
