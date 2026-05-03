@@ -27,3 +27,5 @@ export const UNIT_LABELS: Record<CommodityUnit, string> = {
   pound:   'lb',
   unit:    'unit',
 };
+
+export const VALID_UNITS = Object.keys(UNIT_LABELS) as CommodityUnit[];

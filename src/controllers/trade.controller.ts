@@ -4,7 +4,7 @@ import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
 import { Trade } from '../types/portfolio';
-import { COMMODITY_CONFIG, COMMODITY_TICKERS } from '../config/commodities';
+import { COMMODITY_CONFIG, COMMODITY_TICKERS, VALID_UNITS } from '../config/commodities';
 
 /**
  * Verify that a portfolio belongs to the current user/family context.
@@ -91,9 +91,8 @@ export const createTrade = async (
       if (!unit) {
         resolvedUnit = COMMODITY_CONFIG[upperTicker as typeof COMMODITY_TICKERS[number]].unit;
       } else {
-        const validUnits = ['troy_oz', 'barrel', 'gram', 'kg', 'oz', 'pound', 'unit'];
-        if (!validUnits.includes(unit)) {
-          throw new AppError(`unit must be one of: ${validUnits.join(', ')}`, 400);
+        if (!VALID_UNITS.includes(unit)) {
+          throw new AppError(`unit must be one of: ${VALID_UNITS.join(', ')}`, 400);
         }
         resolvedUnit = unit;
       }
@@ -159,7 +158,11 @@ export const updateTrade = async (
       .eq('portfolio_id', portfolioId)
       .single();
 
-    const isCommodity = existing?.asset_type === 'commodity';
+    if (!existing) {
+      throw new AppError('Trade not found', 404);
+    }
+
+    const isCommodity = existing.asset_type === 'commodity';
 
     if (market && !isCommodity && !['US', 'SGX', 'HK', 'CN'].includes(market)) {
       throw new AppError('market must be one of: US, SGX, HK, CN', 400);
@@ -169,15 +172,23 @@ export const updateTrade = async (
       throw new AppError('type must be buy or sell', 400);
     }
 
-    if (unit) {
-      const validUnits = ['troy_oz', 'barrel', 'gram', 'kg', 'oz', 'pound', 'unit'];
-      if (!validUnits.includes(unit)) {
-        throw new AppError(`unit must be one of: ${validUnits.join(', ')}`, 400);
+    if (unit !== undefined) {
+      if (!isCommodity) {
+        throw new AppError('unit can only be set on commodity trades', 400);
+      }
+      if (!VALID_UNITS.includes(unit)) {
+        throw new AppError(`unit must be one of: ${VALID_UNITS.join(', ')}`, 400);
       }
     }
 
     const updates: Record<string, unknown> = {};
-    if (ticker !== undefined) updates.ticker = ticker.toUpperCase();
+    if (ticker !== undefined) {
+      const upper = ticker.toUpperCase();
+      if (isCommodity && !COMMODITY_TICKERS.includes(upper as typeof COMMODITY_TICKERS[number])) {
+        throw new AppError(`ticker must be one of: ${COMMODITY_TICKERS.join(', ')}`, 400);
+      }
+      updates.ticker = upper;
+    }
     if (market !== undefined && !isCommodity) updates.market = market;
     if (type !== undefined) updates.type = type;
     if (shares !== undefined) updates.shares = Number(shares);
@@ -185,7 +196,7 @@ export const updateTrade = async (
     if (currency !== undefined) updates.currency = currency;
     if (date !== undefined) updates.date = date;
     if (notes !== undefined) updates.notes = notes;
-    if (unit !== undefined) updates.unit = unit;
+    if (unit !== undefined && isCommodity) updates.unit = unit;
 
     const { data, error } = await supabaseAdmin
       .from('trades')
