@@ -306,12 +306,19 @@ export const getAnalytics = async (
     const totalValue = activeHoldings.reduce((s, h) => s + (h.value ?? 0), 0);
 
     // Fetch price histories in parallel
-    const histories = await Promise.all(
+    const historiesRaw = await Promise.all(
       activeHoldings.map(async h => ({
         weight: (h.value ?? 0) / totalValue,
         prices: await fetchDailyHistory(h.ticker, h.market),
       }))
     );
+
+    // Re-normalise weights to sum to 1 after excluding holdings with no price data (e.g. commodities).
+    // This ensures fixed-weight Sharpe is not deflated by missing-data holdings.
+    const coveredWeight = historiesRaw.reduce((s, h) => s + (h.prices.length > 0 ? h.weight : 0), 0);
+    const histories = coveredWeight > 0
+      ? historiesRaw.map(h => ({ ...h, weight: h.prices.length > 0 ? h.weight / coveredWeight : 0 }))
+      : historiesRaw;
 
     // Fetch SPY first — use its trading calendar as the reference date series
     const spyPrices = await fetchDailyHistory('SPY', 'US');
