@@ -64,6 +64,11 @@ Commodity trades always use `market = 'COMMODITY'`.
 
 New file: `supabase/migrations/002_commodity.sql`
 
+**Existing data safety:**
+- `asset_type DEFAULT 'stock'` — all existing trade rows automatically backfilled to `'stock'`
+- `unit` has no default — all existing rows get `NULL`, which is correct for stocks
+- `market` constraint expansion is backwards-compatible — existing values (US/SGX/HK/CN) remain valid
+
 ```sql
 -- Add asset_type and unit columns to trades
 ALTER TABLE trades
