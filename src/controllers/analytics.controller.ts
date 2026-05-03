@@ -131,7 +131,7 @@ function scoreMetric(value: number | null, thresholds: [number, number][], nullS
   for (const [threshold, score] of thresholds) {
     if (value >= threshold) return score;
   }
-  return thresholds[thresholds.length - 1][1];
+  return 20;
 }
 
 function getThresholds(profile: ScoringProfile) {
@@ -159,10 +159,16 @@ function calcScore(metrics: AnalyticsMetrics, profile: ScoringProfile): Analytic
   const diversification = Math.round(
     (scoreMetric(-metrics.concentration_hhi, t.hhi) + marketScore + scoreMetric(-metrics.concentration_top3, t.top3)) / 3
   );
-  const profitFactor = metrics.avg_loss_pct !== null && metrics.avg_loss_pct !== 0 && metrics.avg_win_pct !== null
-    ? metrics.avg_win_pct / Math.abs(metrics.avg_loss_pct)
-    : metrics.avg_win_pct !== null ? 3 : null;
-  const winLossQuality = Math.round((scoreMetric(metrics.win_rate, t.winRate) + scoreMetric(profitFactor, t.profitFactor)) / 2);
+  // When there are no losers (avg_loss_pct is null) but there are winners, profit factor = 100 (max)
+  const profitFactorScore = (metrics.avg_loss_pct === null && metrics.avg_win_pct !== null)
+    ? 100
+    : scoreMetric(
+        metrics.avg_loss_pct !== null && metrics.avg_loss_pct !== 0 && metrics.avg_win_pct !== null
+          ? metrics.avg_win_pct / Math.abs(metrics.avg_loss_pct)
+          : null,
+        t.profitFactor
+      );
+  const winLossQuality = Math.round((scoreMetric(metrics.win_rate, t.winRate) + profitFactorScore) / 2);
   const total = Math.round(returnQuality * 0.30 + riskControl * 0.30 + diversification * 0.25 + winLossQuality * 0.15);
   const level: 'A' | 'B' | 'C' | 'D' = total >= 85 ? 'A' : total >= 70 ? 'B' : total >= 55 ? 'C' : 'D';
   return { total, level, return_quality: returnQuality, risk_control: riskControl, diversification, win_loss_quality: winLossQuality };
@@ -284,7 +290,7 @@ export const getAnalytics = async (
       concentration_top3: top3Weight,
       concentration_hhi: hhi,
       market_count: marketCount,
-      data_months: portfolioReturns.length,
+      data_months: portfolioReturns.length > 0 ? portfolioReturns.length + 1 : 0,
     };
 
     res.json({ success: true, data: { score: calcScore(metrics, profile), metrics, flags: buildFlags(metrics), scoring_profile: profile } });
