@@ -64,26 +64,46 @@ async function fetchDailyHistory(ticker: string, market: string): Promise<Monthl
   }
 }
 
-function computePortfolioReturns(histories: { weight: number; prices: MonthlyPrice[] }[]): number[] {
+function computePortfolioReturns(
+  histories: { weight: number; prices: MonthlyPrice[] }[],
+  referenceDates?: string[]
+): number[] {
   if (histories.length === 0) return [];
-  const reference = histories.find(h => h.prices.length >= 3);
-  if (!reference) return [];
-  const dates = reference.prices.filter(p => p.close !== null).map(p => p.date);
+
+  // Use provided date calendar (e.g. SPY), or fall back to first history with enough data
+  let dates: string[];
+  if (referenceDates && referenceDates.length >= 3) {
+    dates = referenceDates;
+  } else {
+    const reference = histories.find(h => h.prices.length >= 3);
+    if (!reference) return [];
+    dates = reference.prices.filter(p => p.close !== null).map(p => p.date);
+  }
+
+  // Build date→price index per holding for O(1) lookup
+  const priceIndex = histories.map(({ prices }) => {
+    const m = new Map<string, number>();
+    for (const p of prices) {
+      if (p.close !== null) m.set(p.date, p.close);
+    }
+    return m;
+  });
+
   const returns: number[] = [];
   for (let i = 1; i < dates.length; i++) {
     let portfolioReturn = 0;
     let weightUsed = 0;
-    for (const { weight, prices } of histories) {
-      const prev = prices.find(p => p.date === dates[i - 1]);
-      const curr = prices.find(p => p.date === dates[i]);
-      if (prev?.close && curr?.close && prev.close > 0) {
-        portfolioReturn += weight * ((curr.close - prev.close) / prev.close);
-        weightUsed += weight;
+    for (let j = 0; j < histories.length; j++) {
+      const prev = priceIndex[j].get(dates[i - 1]);
+      const curr = priceIndex[j].get(dates[i]);
+      if (prev && curr && prev > 0) {
+        portfolioReturn += histories[j].weight * ((curr - prev) / prev);
+        weightUsed += histories[j].weight;
       }
     }
-    // Normalise by covered weight so excluded tickers (commodities, missing data) don't deflate returns.
-    // Only include days where >95% of portfolio value has price data (filters cross-market holidays).
-    if (weightUsed > 0.95) returns.push(portfolioReturn / weightUsed);
+    // Normalise by covered weight — includes all days on the reference calendar.
+    // Cross-market holidays naturally get lower coverage but are not excluded.
+    if (weightUsed > 0) returns.push(portfolioReturn / weightUsed);
   }
   return returns;
 }
@@ -295,10 +315,9 @@ export const getAnalytics = async (
       }))
     );
 
-    const portfolioReturns = computePortfolioReturns(histories);
-
-    // Fetch SPY benchmark history and compute returns directly
+    // Fetch SPY first — use its trading calendar as the reference date series
     const spyPrices = await fetchDailyHistory('SPY', 'US');
+    const spyDates = spyPrices.filter(p => p.close !== null).map(p => p.date);
     const spyReturns: number[] = [];
     for (let i = 1; i < spyPrices.length; i++) {
       const prev = spyPrices[i - 1];
@@ -307,6 +326,9 @@ export const getAnalytics = async (
         spyReturns.push((curr.close - prev.close) / prev.close);
       }
     }
+
+    // Use SPY date calendar so portfolio returns align with SPY returns for Beta calculation
+    const portfolioReturns = computePortfolioReturns(histories, spyDates);
     const { beta, alpha_annual, r_squared } = calcBetaAlpha(portfolioReturns, spyReturns);
 
     // Concentration metrics
