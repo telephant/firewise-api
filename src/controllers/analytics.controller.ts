@@ -26,6 +26,9 @@ interface AnalyticsMetrics {
   concentration_hhi: number;
   market_count: number;
   data_months: number;
+  beta: number | null;
+  alpha_annual: number | null;
+  r_squared: number | null;
 }
 
 interface AnalyticsScore {
@@ -126,6 +129,33 @@ function calcMaxDrawdown(returns: number[]): number | null {
   return maxDD;
 }
 
+function calcBetaAlpha(portfolioReturns: number[], spyReturns: number[]): { beta: number | null; alpha_annual: number | null; r_squared: number | null } {
+  // Align to same length (take the shorter)
+  const n = Math.min(portfolioReturns.length, spyReturns.length);
+  if (n < 3) return { beta: null, alpha_annual: null, r_squared: null };
+
+  const p = portfolioReturns.slice(-n);
+  const s = spyReturns.slice(-n);
+
+  const meanP = p.reduce((a, b) => a + b, 0) / n;
+  const meanS = s.reduce((a, b) => a + b, 0) / n;
+
+  let cov = 0, varS = 0, varP = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (p[i] - meanP) * (s[i] - meanS);
+    varS += (s[i] - meanS) ** 2;
+    varP += (p[i] - meanP) ** 2;
+  }
+
+  if (varS === 0) return { beta: null, alpha_annual: null, r_squared: null };
+
+  const beta = cov / varS;
+  const alpha_annual = (meanP - RISK_FREE_MONTHLY - beta * (meanS - RISK_FREE_MONTHLY)) * 12;
+  const r_squared = varP === 0 ? 0 : (cov / Math.sqrt(varS * varP)) ** 2;
+
+  return { beta, alpha_annual, r_squared };
+}
+
 function scoreMetric(value: number | null, thresholds: [number, number][], nullScore = 50): number {
   if (value === null) return nullScore;
   for (const [threshold, score] of thresholds) {
@@ -221,6 +251,7 @@ export const getAnalytics = async (
         sharpe_ratio: null, sortino_ratio: null, volatility_annual: null, max_drawdown: null,
         win_rate: null, avg_win_pct: null, avg_loss_pct: null,
         concentration_top3: 0, concentration_hhi: 0, market_count: 0, data_months: 0,
+        beta: null, alpha_annual: null, r_squared: null,
       };
       res.json({ success: true, data: { score: calcScore(emptyMetrics, profile), metrics: emptyMetrics, flags: [], scoring_profile: profile } });
       return;
@@ -248,6 +279,7 @@ export const getAnalytics = async (
         sharpe_ratio: null, sortino_ratio: null, volatility_annual: null, max_drawdown: null,
         win_rate: null, avg_win_pct: null, avg_loss_pct: null,
         concentration_top3: 0, concentration_hhi: 0, market_count: 0, data_months: 0,
+        beta: null, alpha_annual: null, r_squared: null,
       };
       res.json({ success: true, data: { score: calcScore(emptyMetrics, profile), metrics: emptyMetrics, flags: [], scoring_profile: profile } });
       return;
@@ -264,6 +296,12 @@ export const getAnalytics = async (
     );
 
     const portfolioReturns = computePortfolioReturns(histories);
+
+    // Fetch SPY benchmark history
+    const spyPrices = await fetchMonthlyHistory('SPY', 'US');
+    const spyHistories = [{ weight: 1, prices: spyPrices }];
+    const spyReturns = computePortfolioReturns(spyHistories);
+    const { beta, alpha_annual, r_squared } = calcBetaAlpha(portfolioReturns, spyReturns);
 
     // Concentration metrics
     const sorted = [...activeHoldings].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
@@ -291,6 +329,9 @@ export const getAnalytics = async (
       concentration_hhi: hhi,
       market_count: marketCount,
       data_months: portfolioReturns.length > 0 ? portfolioReturns.length + 1 : 0,
+      beta,
+      alpha_annual,
+      r_squared,
     };
 
     res.json({ success: true, data: { score: calcScore(metrics, profile), metrics, flags: buildFlags(metrics), scoring_profile: profile } });
