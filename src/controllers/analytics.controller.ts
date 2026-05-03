@@ -49,14 +49,14 @@ interface AnalyticsResponse {
   scoring_profile: ScoringProfile;
 }
 
-async function fetchMonthlyHistory(ticker: string, market: string): Promise<MonthlyPrice[]> {
+async function fetchDailyHistory(ticker: string, market: string): Promise<MonthlyPrice[]> {
   if (market === 'COMMODITY') return [];
   let yticker = ticker;
   if (market === 'SGX') yticker = `${ticker}.SI`;
   else if (market === 'HK') yticker = `${ticker}.HK`;
   else if (market === 'CN') yticker = `${ticker}.SS`;
   try {
-    const url = `${FINDATA_BASE_URL}/stock/history/${encodeURIComponent(yticker)}?period=1y&interval=1mo`;
+    const url = `${FINDATA_BASE_URL}/stock/history/${encodeURIComponent(yticker)}?period=1y&interval=1d`;
     const res = await fetch(url);
     if (!res.ok) return [];
     const data = await res.json() as { prices: { date: string; close: number | null }[] };
@@ -70,7 +70,7 @@ function computePortfolioReturns(histories: { weight: number; prices: MonthlyPri
   if (histories.length === 0) return [];
   const reference = histories.find(h => h.prices.length >= 3);
   if (!reference) return [];
-  const dates = reference.prices.filter(p => p.close !== null).map(p => p.date).slice(-13);
+  const dates = reference.prices.filter(p => p.close !== null).map(p => p.date);
   const returns: number[] = [];
   for (let i = 1; i < dates.length; i++) {
     let portfolioReturn = 0;
@@ -88,37 +88,37 @@ function computePortfolioReturns(histories: { weight: number; prices: MonthlyPri
   return returns;
 }
 
-const RISK_FREE_MONTHLY = 0.04 / 12;
+const RISK_FREE_DAILY = 0.04 / 252;
 
 function calcSharpe(returns: number[]): number | null {
-  if (returns.length < 3) return null;
+  if (returns.length < 63) return null;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / (returns.length - 1);
   const stddev = Math.sqrt(variance);
   if (stddev === 0) return null;
-  return ((mean - RISK_FREE_MONTHLY) / stddev) * Math.sqrt(12);
+  return ((mean - RISK_FREE_DAILY) / stddev) * Math.sqrt(252);
 }
 
 function calcSortino(returns: number[]): number | null {
-  if (returns.length < 3) return null;
+  if (returns.length < 63) return null;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const downside = returns.filter(r => r < RISK_FREE_MONTHLY);
+  const downside = returns.filter(r => r < RISK_FREE_DAILY);
   if (downside.length === 0) return null;
-  const downVariance = downside.reduce((a, r) => a + Math.pow(r - RISK_FREE_MONTHLY, 2), 0) / downside.length;
+  const downVariance = downside.reduce((a, r) => a + Math.pow(r - RISK_FREE_DAILY, 2), 0) / downside.length;
   const downStd = Math.sqrt(downVariance);
   if (downStd === 0) return null;
-  return ((mean - RISK_FREE_MONTHLY) / downStd) * Math.sqrt(12);
+  return ((mean - RISK_FREE_DAILY) / downStd) * Math.sqrt(252);
 }
 
 function calcVolatility(returns: number[]): number | null {
-  if (returns.length < 3) return null;
+  if (returns.length < 63) return null;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / (returns.length - 1);
-  return Math.sqrt(variance) * Math.sqrt(12);
+  return Math.sqrt(variance) * Math.sqrt(252);
 }
 
 function calcMaxDrawdown(returns: number[]): number | null {
-  if (returns.length < 2) return null;
+  if (returns.length < 63) return null;
   let peak = 1, value = 1, maxDD = 0;
   for (const r of returns) {
     value *= 1 + r;
@@ -132,7 +132,7 @@ function calcMaxDrawdown(returns: number[]): number | null {
 function calcBetaAlpha(portfolioReturns: number[], spyReturns: number[]): { beta: number | null; alpha_annual: number | null; r_squared: number | null } {
   // Align to same length (take the shorter)
   const n = Math.min(portfolioReturns.length, spyReturns.length);
-  if (n < 3) return { beta: null, alpha_annual: null, r_squared: null };
+  if (n < 63) return { beta: null, alpha_annual: null, r_squared: null };
 
   const p = portfolioReturns.slice(-n);
   const s = spyReturns.slice(-n);
@@ -150,7 +150,7 @@ function calcBetaAlpha(portfolioReturns: number[], spyReturns: number[]): { beta
   if (varS === 0) return { beta: null, alpha_annual: null, r_squared: null };
 
   const beta = cov / varS;
-  const alpha_annual = (meanP - RISK_FREE_MONTHLY - beta * (meanS - RISK_FREE_MONTHLY)) * 12;
+  const alpha_annual = (meanP - RISK_FREE_DAILY - beta * (meanS - RISK_FREE_DAILY)) * 12;
   const r_squared = varP === 0 ? 0 : (cov / Math.sqrt(varS * varP)) ** 2;
 
   return { beta, alpha_annual, r_squared };
@@ -209,7 +209,7 @@ function buildFlags(metrics: AnalyticsMetrics): AnalyticsFlag[] {
   if (metrics.concentration_top3 > 0.60) flags.push({ type: 'warning', message: 'Top 3 holdings exceed 60% of portfolio' });
   if (metrics.market_count === 1) flags.push({ type: 'warning', message: 'All holdings in a single market' });
   if (metrics.max_drawdown !== null && metrics.max_drawdown < -0.25) flags.push({ type: 'warning', message: 'Portfolio has experienced a drawdown > 25%' });
-  if (metrics.data_months < 6) flags.push({ type: 'info', message: 'Limited price history — some metrics may be less accurate' });
+  if (metrics.data_months < 6) flags.push({ type: 'info', message: 'Less than 6 months of price history — some metrics may be less accurate' });
   if (metrics.win_rate !== null && metrics.win_rate < 0.40) flags.push({ type: 'info', message: 'Less than 40% of holdings are profitable' });
   return flags;
 }
@@ -291,14 +291,14 @@ export const getAnalytics = async (
     const histories = await Promise.all(
       activeHoldings.map(async h => ({
         weight: (h.value ?? 0) / totalValue,
-        prices: await fetchMonthlyHistory(h.ticker, h.market),
+        prices: await fetchDailyHistory(h.ticker, h.market),
       }))
     );
 
     const portfolioReturns = computePortfolioReturns(histories);
 
     // Fetch SPY benchmark history and compute returns directly
-    const spyPrices = await fetchMonthlyHistory('SPY', 'US');
+    const spyPrices = await fetchDailyHistory('SPY', 'US');
     const spyReturns: number[] = [];
     for (let i = 1; i < spyPrices.length; i++) {
       const prev = spyPrices[i - 1];
@@ -334,7 +334,7 @@ export const getAnalytics = async (
       concentration_top3: top3Weight,
       concentration_hhi: hhi,
       market_count: marketCount,
-      data_months: portfolioReturns.length > 0 ? portfolioReturns.length + 1 : 0,
+      data_months: portfolioReturns.length > 0 ? Math.round(portfolioReturns.length / 21) : 0,
       beta,
       alpha_annual,
       r_squared,
