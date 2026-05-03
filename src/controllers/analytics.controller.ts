@@ -92,18 +92,16 @@ function computePortfolioReturns(
   const returns: number[] = [];
   for (let i = 1; i < dates.length; i++) {
     let portfolioReturn = 0;
-    let weightUsed = 0;
     for (let j = 0; j < histories.length; j++) {
       const prev = priceIndex[j].get(dates[i - 1]);
       const curr = priceIndex[j].get(dates[i]);
       if (prev && curr && prev > 0) {
         portfolioReturn += histories[j].weight * ((curr - prev) / prev);
-        weightUsed += histories[j].weight;
       }
     }
-    // Normalise by covered weight — includes all days on the reference calendar.
-    // Cross-market holidays naturally get lower coverage but are not excluded.
-    if (weightUsed > 0) returns.push(portfolioReturn / weightUsed);
+    // Fixed-weight: missing prices (holidays, commodities) contribute 0 for that day.
+    // Matches standard portfolio return methodology (no normalisation).
+    returns.push(portfolioReturn);
   }
   return returns;
 }
