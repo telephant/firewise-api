@@ -83,7 +83,9 @@ function computePortfolioReturns(histories: { weight: number; prices: MonthlyPri
         weightUsed += weight;
       }
     }
-    if (weightUsed > 0.1) returns.push(portfolioReturn);
+    // Normalise by covered weight so excluded tickers (commodities, missing data) don't deflate returns.
+    // Only include days where >95% of portfolio value has price data (filters cross-market holidays).
+    if (weightUsed > 0.95) returns.push(portfolioReturn / weightUsed);
   }
   return returns;
 }
