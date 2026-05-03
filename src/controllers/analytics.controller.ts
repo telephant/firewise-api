@@ -90,7 +90,7 @@ const RISK_FREE_MONTHLY = 0.04 / 12;
 function calcSharpe(returns: number[]): number | null {
   if (returns.length < 3) return null;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / returns.length;
+  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / (returns.length - 1);
   const stddev = Math.sqrt(variance);
   if (stddev === 0) return null;
   return ((mean - RISK_FREE_MONTHLY) / stddev) * Math.sqrt(12);
@@ -101,7 +101,7 @@ function calcSortino(returns: number[]): number | null {
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const downside = returns.filter(r => r < RISK_FREE_MONTHLY);
   if (downside.length === 0) return null;
-  const downVariance = downside.reduce((a, r) => a + Math.pow(r - RISK_FREE_MONTHLY, 2), 0) / returns.length;
+  const downVariance = downside.reduce((a, r) => a + Math.pow(r - RISK_FREE_MONTHLY, 2), 0) / downside.length;
   const downStd = Math.sqrt(downVariance);
   if (downStd === 0) return null;
   return ((mean - RISK_FREE_MONTHLY) / downStd) * Math.sqrt(12);
@@ -110,7 +110,7 @@ function calcSortino(returns: number[]): number | null {
 function calcVolatility(returns: number[]): number | null {
   if (returns.length < 3) return null;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / returns.length;
+  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / (returns.length - 1);
   return Math.sqrt(variance) * Math.sqrt(12);
 }
 
