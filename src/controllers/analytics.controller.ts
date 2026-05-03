@@ -1,0 +1,299 @@
+// src/controllers/analytics.controller.ts
+import { Response } from 'express';
+import { supabaseAdmin } from '../config/supabase';
+import { AuthenticatedRequest, ApiResponse } from '../types';
+import { AppError } from '../middleware/error';
+import { getViewContext } from '../utils/family-context';
+import { fetchStockPrices } from '../utils/findata-client';
+import { buildHoldings, computePositions } from '../utils/portfolio-calc';
+import { Trade } from '../types/portfolio';
+
+const FINDATA_BASE_URL = process.env.FINDATA_URL || 'http://localhost:8002';
+
+type ScoringProfile = 'lenient' | 'moderate' | 'strict';
+
+interface MonthlyPrice { date: string; close: number | null; }
+
+interface AnalyticsMetrics {
+  sharpe_ratio: number | null;
+  sortino_ratio: number | null;
+  volatility_annual: number | null;
+  max_drawdown: number | null;
+  win_rate: number | null;
+  avg_win_pct: number | null;
+  avg_loss_pct: number | null;
+  concentration_top3: number;
+  concentration_hhi: number;
+  market_count: number;
+  data_months: number;
+}
+
+interface AnalyticsScore {
+  total: number;
+  level: 'A' | 'B' | 'C' | 'D';
+  return_quality: number;
+  risk_control: number;
+  diversification: number;
+  win_loss_quality: number;
+}
+
+interface AnalyticsFlag { type: 'warning' | 'info'; message: string; }
+
+interface AnalyticsResponse {
+  score: AnalyticsScore;
+  metrics: AnalyticsMetrics;
+  flags: AnalyticsFlag[];
+  scoring_profile: ScoringProfile;
+}
+
+async function fetchMonthlyHistory(ticker: string, market: string): Promise<MonthlyPrice[]> {
+  if (market === 'COMMODITY') return [];
+  let yticker = ticker;
+  if (market === 'SGX') yticker = `${ticker}.SI`;
+  else if (market === 'HK') yticker = `${ticker}.HK`;
+  else if (market === 'CN') yticker = `${ticker}.SS`;
+  try {
+    const url = `${FINDATA_BASE_URL}/stock/history/${encodeURIComponent(yticker)}?period=1y&interval=1mo`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json() as { prices: { date: string; close: number | null }[] };
+    return data.prices ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function computePortfolioReturns(histories: { weight: number; prices: MonthlyPrice[] }[]): number[] {
+  if (histories.length === 0) return [];
+  const reference = histories.find(h => h.prices.length >= 3);
+  if (!reference) return [];
+  const dates = reference.prices.filter(p => p.close !== null).map(p => p.date).slice(-13);
+  const returns: number[] = [];
+  for (let i = 1; i < dates.length; i++) {
+    let portfolioReturn = 0;
+    let weightUsed = 0;
+    for (const { weight, prices } of histories) {
+      const prev = prices.find(p => p.date === dates[i - 1]);
+      const curr = prices.find(p => p.date === dates[i]);
+      if (prev?.close && curr?.close && prev.close > 0) {
+        portfolioReturn += weight * ((curr.close - prev.close) / prev.close);
+        weightUsed += weight;
+      }
+    }
+    if (weightUsed > 0.1) returns.push(portfolioReturn / weightUsed);
+  }
+  return returns;
+}
+
+const RISK_FREE_MONTHLY = 0.04 / 12;
+
+function calcSharpe(returns: number[]): number | null {
+  if (returns.length < 3) return null;
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / returns.length;
+  const stddev = Math.sqrt(variance);
+  if (stddev === 0) return null;
+  return ((mean - RISK_FREE_MONTHLY) / stddev) * Math.sqrt(12);
+}
+
+function calcSortino(returns: number[]): number | null {
+  if (returns.length < 3) return null;
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const downside = returns.filter(r => r < RISK_FREE_MONTHLY);
+  if (downside.length === 0) return null;
+  const downVariance = downside.reduce((a, r) => a + Math.pow(r - RISK_FREE_MONTHLY, 2), 0) / returns.length;
+  const downStd = Math.sqrt(downVariance);
+  if (downStd === 0) return null;
+  return ((mean - RISK_FREE_MONTHLY) / downStd) * Math.sqrt(12);
+}
+
+function calcVolatility(returns: number[]): number | null {
+  if (returns.length < 3) return null;
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance = returns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / returns.length;
+  return Math.sqrt(variance) * Math.sqrt(12);
+}
+
+function calcMaxDrawdown(returns: number[]): number | null {
+  if (returns.length < 2) return null;
+  let peak = 1, value = 1, maxDD = 0;
+  for (const r of returns) {
+    value *= 1 + r;
+    if (value > peak) peak = value;
+    const dd = (value - peak) / peak;
+    if (dd < maxDD) maxDD = dd;
+  }
+  return maxDD;
+}
+
+function scoreMetric(value: number | null, thresholds: [number, number][], nullScore = 50): number {
+  if (value === null) return nullScore;
+  for (const [threshold, score] of thresholds) {
+    if (value >= threshold) return score;
+  }
+  return thresholds[thresholds.length - 1][1];
+}
+
+function getThresholds(profile: ScoringProfile) {
+  const m = profile === 'lenient' ? 0.8 : profile === 'strict' ? 1.2 : 1.0;
+  return {
+    sharpe:       [[1.5 / m, 100], [1.0 / m, 80], [0.5 / m, 60], [0, 40]] as [number, number][],
+    sortino:      [[2.0 / m, 100], [1.5 / m, 80], [1.0 / m, 60], [0, 40]] as [number, number][],
+    volatility:   [[-0.10 * m, 100], [-0.15 * m, 80], [-0.20 * m, 60], [-0.30 * m, 40]] as [number, number][],
+    maxDrawdown:  [[-0.05 * m, 100], [-0.10 * m, 80], [-0.20 * m, 60], [-0.30 * m, 40]] as [number, number][],
+    hhi:          [[-0.10 * m, 100], [-0.15 * m, 80], [-0.25 * m, 60], [-0.40 * m, 40]] as [number, number][],
+    top3:         [[-0.40 * m, 100], [-0.50 * m, 80], [-0.60 * m, 60], [-0.75 * m, 40]] as [number, number][],
+    winRate:      [[0.70 * m, 100], [0.60 * m, 80], [0.50 * m, 60], [0.40 * m, 40]] as [number, number][],
+    profitFactor: [[3.0 / m, 100], [2.0 / m, 80], [1.5 / m, 60], [1.0 / m, 40]] as [number, number][],
+  };
+}
+
+function calcScore(metrics: AnalyticsMetrics, profile: ScoringProfile): AnalyticsScore {
+  const t = getThresholds(profile);
+  const returnQuality = Math.round((scoreMetric(metrics.sharpe_ratio, t.sharpe) + scoreMetric(metrics.sortino_ratio, t.sortino)) / 2);
+  const riskControl = Math.round(
+    (scoreMetric(metrics.volatility_annual !== null ? -metrics.volatility_annual : null, t.volatility) +
+     scoreMetric(metrics.max_drawdown, t.maxDrawdown)) / 2
+  );
+  const marketScore = metrics.market_count >= 3 ? 100 : metrics.market_count === 2 ? 70 : 40;
+  const diversification = Math.round(
+    (scoreMetric(-metrics.concentration_hhi, t.hhi) + marketScore + scoreMetric(-metrics.concentration_top3, t.top3)) / 3
+  );
+  const profitFactor = metrics.avg_loss_pct !== null && metrics.avg_loss_pct !== 0 && metrics.avg_win_pct !== null
+    ? metrics.avg_win_pct / Math.abs(metrics.avg_loss_pct)
+    : metrics.avg_win_pct !== null ? 3 : null;
+  const winLossQuality = Math.round((scoreMetric(metrics.win_rate, t.winRate) + scoreMetric(profitFactor, t.profitFactor)) / 2);
+  const total = Math.round(returnQuality * 0.30 + riskControl * 0.30 + diversification * 0.25 + winLossQuality * 0.15);
+  const level: 'A' | 'B' | 'C' | 'D' = total >= 85 ? 'A' : total >= 70 ? 'B' : total >= 55 ? 'C' : 'D';
+  return { total, level, return_quality: returnQuality, risk_control: riskControl, diversification, win_loss_quality: winLossQuality };
+}
+
+function buildFlags(metrics: AnalyticsMetrics): AnalyticsFlag[] {
+  const flags: AnalyticsFlag[] = [];
+  if (metrics.concentration_top3 > 0.60) flags.push({ type: 'warning', message: 'Top 3 holdings exceed 60% of portfolio' });
+  if (metrics.market_count === 1) flags.push({ type: 'warning', message: 'All holdings in a single market' });
+  if (metrics.max_drawdown !== null && metrics.max_drawdown < -0.25) flags.push({ type: 'warning', message: 'Portfolio has experienced a drawdown > 25%' });
+  if (metrics.data_months < 6) flags.push({ type: 'info', message: 'Limited price history — some metrics may be less accurate' });
+  if (metrics.win_rate !== null && metrics.win_rate < 0.40) flags.push({ type: 'info', message: 'Less than 40% of holdings are profitable' });
+  return flags;
+}
+
+export const getAnalytics = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<AnalyticsResponse>>
+): Promise<void> => {
+  try {
+    const ctx = await getViewContext(req);
+    const portfolioId = req.params.id;
+    const profile: ScoringProfile =
+      req.query.profile === 'lenient' ? 'lenient'
+      : req.query.profile === 'strict' ? 'strict'
+      : 'moderate';
+
+    // Verify ownership
+    const { data: portfolio } = await supabaseAdmin
+      .from('portfolios')
+      .select('id')
+      .eq('id', portfolioId)
+      .eq('belong_id', ctx.belongId)
+      .single();
+    if (!portfolio) throw new AppError('Portfolio not found', 404);
+
+    // Fetch trades (same as holding.controller.ts)
+    const { data: trades, error: tradesError } = await supabaseAdmin
+      .from('trades')
+      .select('*')
+      .eq('portfolio_id', portfolioId)
+      .order('date', { ascending: true });
+
+    if (tradesError) throw new AppError('Failed to fetch trades', 500);
+
+    const tradeList: Trade[] = trades || [];
+
+    if (tradeList.length === 0) {
+      const emptyMetrics: AnalyticsMetrics = {
+        sharpe_ratio: null, sortino_ratio: null, volatility_annual: null, max_drawdown: null,
+        win_rate: null, avg_win_pct: null, avg_loss_pct: null,
+        concentration_top3: 0, concentration_hhi: 0, market_count: 0, data_months: 0,
+      };
+      res.json({ success: true, data: { score: calcScore(emptyMetrics, profile), metrics: emptyMetrics, flags: [], scoring_profile: profile } });
+      return;
+    }
+
+    // Compute positions to get active tickers (same as holding.controller.ts)
+    const positions = computePositions(tradeList);
+    const activeTickers = Array.from(positions.entries())
+      .filter(([, pos]) => pos.shares > 0)
+      .map(([ticker]) => ticker);
+
+    // Batch fetch live prices
+    const pricesRaw = await fetchStockPrices(activeTickers);
+    const priceMap: Record<string, { price: number | null; currency: string }> = {};
+    for (const [ticker, stockPrice] of Object.entries(pricesRaw)) {
+      priceMap[ticker] = { price: stockPrice.price, currency: stockPrice.currency };
+    }
+
+    // Build holdings (same as holding.controller.ts)
+    const holdings = buildHoldings(tradeList, priceMap);
+    const activeHoldings = holdings.filter(h => h.value !== null && h.value > 0);
+
+    if (activeHoldings.length === 0) {
+      const emptyMetrics: AnalyticsMetrics = {
+        sharpe_ratio: null, sortino_ratio: null, volatility_annual: null, max_drawdown: null,
+        win_rate: null, avg_win_pct: null, avg_loss_pct: null,
+        concentration_top3: 0, concentration_hhi: 0, market_count: 0, data_months: 0,
+      };
+      res.json({ success: true, data: { score: calcScore(emptyMetrics, profile), metrics: emptyMetrics, flags: [], scoring_profile: profile } });
+      return;
+    }
+
+    const totalValue = activeHoldings.reduce((s, h) => s + (h.value ?? 0), 0);
+
+    // Fetch price histories in parallel
+    const histories = await Promise.all(
+      activeHoldings.map(async h => ({
+        weight: (h.value ?? 0) / totalValue,
+        prices: await fetchMonthlyHistory(h.ticker, h.market),
+      }))
+    );
+
+    const portfolioReturns = computePortfolioReturns(histories);
+
+    // Concentration metrics
+    const sorted = [...activeHoldings].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+    const top3Weight = sorted.slice(0, 3).reduce((s, h) => s + (h.value ?? 0) / totalValue, 0);
+    const hhi = activeHoldings.reduce((s, h) => s + Math.pow((h.value ?? 0) / totalValue, 2), 0);
+    const marketCount = new Set(activeHoldings.map(h => h.market)).size;
+
+    // Win/loss from current unrealized P&L
+    const withPct = activeHoldings.filter(h => h.unrealized_pl_pct !== null);
+    const winners = withPct.filter(h => (h.unrealized_pl_pct ?? 0) > 0);
+    const losers = withPct.filter(h => (h.unrealized_pl_pct ?? 0) < 0);
+    const winRate = withPct.length > 0 ? winners.length / withPct.length : null;
+    const avgWinPct = winners.length > 0 ? winners.reduce((s, h) => s + (h.unrealized_pl_pct ?? 0), 0) / winners.length : null;
+    const avgLossPct = losers.length > 0 ? losers.reduce((s, h) => s + (h.unrealized_pl_pct ?? 0), 0) / losers.length : null;
+
+    const metrics: AnalyticsMetrics = {
+      sharpe_ratio: calcSharpe(portfolioReturns),
+      sortino_ratio: calcSortino(portfolioReturns),
+      volatility_annual: calcVolatility(portfolioReturns),
+      max_drawdown: calcMaxDrawdown(portfolioReturns),
+      win_rate: winRate,
+      avg_win_pct: avgWinPct,
+      avg_loss_pct: avgLossPct,
+      concentration_top3: top3Weight,
+      concentration_hhi: hhi,
+      market_count: marketCount,
+      data_months: portfolioReturns.length,
+    };
+
+    res.json({ success: true, data: { score: calcScore(metrics, profile), metrics, flags: buildFlags(metrics), scoring_profile: profile } });
+  } catch (err) {
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ success: false, error: err.message });
+      return;
+    }
+    console.error('getAnalytics error:', err);
+    res.status(500).json({ success: false, error: 'Failed to compute analytics' });
+  }
+};
