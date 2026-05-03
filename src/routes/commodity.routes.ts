@@ -4,6 +4,8 @@ import { listCommodities } from '../controllers/commodity.controller';
 
 const router = Router();
 
-router.get('/', authMiddleware, listCommodities);
+router.use(authMiddleware);
+
+router.get('/', listCommodities);
 
 export default router;

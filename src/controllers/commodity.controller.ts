@@ -1,7 +1,7 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { COMMODITY_CONFIG, COMMODITY_TICKERS, UNIT_LABELS } from '../config/commodities';
 import { fetchStockPrices } from '../utils/findata-client';
-import { ApiResponse } from '../types';
+import { ApiResponse, AuthenticatedRequest } from '../types';
 
 export interface CommodityInfo {
   ticker: string;
@@ -16,7 +16,7 @@ export interface CommodityInfo {
 
 // GET /fire/commodities
 export const listCommodities = async (
-  _req: Request,
+  _req: AuthenticatedRequest,
   res: Response<ApiResponse<CommodityInfo[]>>
 ): Promise<void> => {
   try {
@@ -38,7 +38,8 @@ export const listCommodities = async (
     });
 
     res.json({ success: true, data: commodities });
-  } catch {
+  } catch (error) {
+    console.error('Error fetching commodity prices:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch commodity prices' });
   }
 };
