@@ -145,12 +145,41 @@ export const getDividendCalendar = async (
     // 4. Determine preferred currency (use first portfolio's currency, or USD)
     const preferredCurrency = portfolios[0]?.currency || 'USD';
 
-    // Collect currencies for exchange rate lookup
+    // Collect currencies for exchange rate lookup (from actual dividends)
     const currencies = new Set<string>([preferredCurrency.toLowerCase()]);
     (actualDividends || []).forEach((d) => currencies.add((d.currency || 'USD').toLowerCase()));
 
-    // For now: no currency conversion (return in original currency, same as dividends table)
-    const rateMap = new Map<string, number>();
+    // Track which months already have actual dividends per ticker (to avoid double-counting with forecasts)
+    const receivedMonthsByTicker = new Map<string, Set<number>>();
+    (actualDividends || []).forEach((d: Dividend) => {
+      if (!receivedMonthsByTicker.has(d.ticker)) {
+        receivedMonthsByTicker.set(d.ticker, new Set());
+      }
+      receivedMonthsByTicker.get(d.ticker)!.add(new Date(d.ex_date).getMonth());
+    });
+
+    // 6. Compute current holdings from trades for forecasting
+    const tradeList: Trade[] = (allTrades || []) as Trade[];
+    const positions = computePositions(tradeList);
+    const activePositions = Array.from(positions.entries())
+      .filter(([, pos]) => pos.shares > 0 && pos.shares > 0.0001);
+
+    // Fetch findata BEFORE building rateMap so we can include forecasted stock currencies
+    let dividendData: Awaited<ReturnType<typeof findata.fetchDividendsBatch>> = {};
+    if (activePositions.length > 0) {
+      const activeTickers = activePositions.map(([ticker]) => ticker);
+      dividendData = await findata.fetchDividendsBatch(activeTickers, year);
+
+      // Add forecasted stock currencies to the set so they are included in exchange rate lookup
+      for (const tickerData of Object.values(dividendData)) {
+        if (tickerData?.currency) {
+          currencies.add(tickerData.currency.toLowerCase());
+        }
+      }
+    }
+
+    // Fetch exchange rates for all relevant currencies
+    const rateMap = await getExchangeRates(Array.from(currencies));
 
     const convertToPreferred = (amount: number, fromCurrency: string) => {
       if (fromCurrency.toLowerCase() === preferredCurrency.toLowerCase()) {
@@ -179,24 +208,7 @@ export const getDividendCalendar = async (
       months[month].total += converted.amount;
     });
 
-    // Track which months already have actual dividends per ticker (to avoid double-counting with forecasts)
-    const receivedMonthsByTicker = new Map<string, Set<number>>();
-    (actualDividends || []).forEach((d: Dividend) => {
-      if (!receivedMonthsByTicker.has(d.ticker)) {
-        receivedMonthsByTicker.set(d.ticker, new Set());
-      }
-      receivedMonthsByTicker.get(d.ticker)!.add(new Date(d.ex_date).getMonth());
-    });
-
-    // 6. Compute current holdings from trades for forecasting
-    const tradeList: Trade[] = (allTrades || []) as Trade[];
-    const positions = computePositions(tradeList);
-    const activePositions = Array.from(positions.entries())
-      .filter(([, pos]) => pos.shares > 0 && pos.shares > 0.0001);
-
     if (activePositions.length > 0) {
-      const activeTickers = activePositions.map(([ticker]) => ticker);
-      const dividendData = await findata.fetchDividendsBatch(activeTickers, year);
 
       for (const [ticker, pos] of activePositions) {
         const tickerData = dividendData[ticker];
