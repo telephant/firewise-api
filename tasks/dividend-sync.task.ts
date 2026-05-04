@@ -146,7 +146,7 @@ export class DividendSyncTask {
               const taxRate = this.getTaxRate(market);
               const grossAmount = sharesAtExdate * amountPerShare;
               const taxWithheld = grossAmount * taxRate;
-              const totalAmount = grossAmount - taxWithheld;
+              const totalAmount = grossAmount; // store gross; frontend applies tax via tax_rate
 
               // Check if existing record has source = 'manual' — skip if so
               const { data: existing } = await this.supabase
