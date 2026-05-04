@@ -5,9 +5,10 @@ import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
 import { fetchStockPrices } from '../utils/findata-client';
 import { computePositions } from '../utils/portfolio-calc';
+import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 import { PortfolioStats, PortfolioSnapshot, Trade } from '../types/portfolio';
 
-// All monetary values are in USD. Portfolio currency is display-only.
+// All monetary values returned in USD. Frontend handles display currency conversion.
 
 // GET /api/portfolios/:id/stats
 export const getPortfolioStats = async (
@@ -53,20 +54,43 @@ export const getPortfolioStats = async (
 
     const pricesRaw = activeTickers.length > 0 ? await fetchStockPrices(activeTickers) : {};
 
-    // 4. Compute totals — all in USD (prices from findata are in USD for US stocks)
+    // 4. Build ticker→currency map from trades + findata (findata is authoritative for price currency)
+    const tickerCurrency = new Map<string, string>();
+    for (const trade of tradeList) {
+      tickerCurrency.set(trade.ticker.toUpperCase(), trade.currency || 'USD');
+    }
+    for (const [ticker, priceData] of Object.entries(pricesRaw)) {
+      if (priceData.currency) tickerCurrency.set(ticker.toUpperCase(), priceData.currency);
+    }
+
+    // Fetch exchange rates for all involved currencies → USD
+    const allCurrencies = new Set<string>(['usd']);
+    tickerCurrency.forEach(c => allCurrencies.add(c.toLowerCase()));
+    const rateMap = await getExchangeRates(Array.from(allCurrencies));
+
+    // Convert any amount to USD; fallback to original if rate missing
+    function toUSD(amount: number, fromCurrency: string): number {
+      if (fromCurrency.toLowerCase() === 'usd') return amount;
+      const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
+      return result ? result.converted : amount;
+    }
+
+    // 5. Compute totals in USD
     let total_value = 0;
     let total_cost = 0;
     let realized_pl = 0;
 
     for (const [ticker, pos] of positions) {
-      realized_pl += pos.realized_pl;
+      const tickerCurr = tickerCurrency.get(ticker) || 'USD';
+      realized_pl += toUSD(pos.realized_pl, tickerCurr);
       if (pos.shares <= 0) continue;
 
-      total_cost += pos.shares * pos.avg_cost;
+      total_cost += toUSD(pos.shares * pos.avg_cost, tickerCurr);
 
       const priceData = pricesRaw[ticker];
       if (priceData?.price != null) {
-        total_value += pos.shares * priceData.price;
+        const priceCurr = priceData.currency || tickerCurr;
+        total_value += toUSD(pos.shares * priceData.price, priceCurr);
       }
     }
 
@@ -82,23 +106,23 @@ export const getPortfolioStats = async (
     const [ytdResult, mtdResult] = await Promise.all([
       supabaseAdmin
         .from('dividends')
-        .select('total_amount')
+        .select('total_amount, currency')
         .eq('portfolio_id', portfolioId)
         .gte('ex_date', `${currentYear}-01-01`)
         .lte('ex_date', `${currentYear}-12-31`),
       supabaseAdmin
         .from('dividends')
-        .select('total_amount')
+        .select('total_amount, currency')
         .eq('portfolio_id', portfolioId)
         .gte('ex_date', `${currentYear}-${monthStr}-01`)
         .lte('ex_date', `${currentYear}-${monthStr}-${daysInMonth}`),
     ]);
 
     const dividend_ytd = (ytdResult.data || []).reduce(
-      (sum, row) => sum + (row.total_amount || 0), 0
+      (sum, row) => sum + toUSD(row.total_amount || 0, row.currency || 'USD'), 0
     );
     const dividend_mtd = (mtdResult.data || []).reduce(
-      (sum, row) => sum + (row.total_amount || 0), 0
+      (sum, row) => sum + toUSD(row.total_amount || 0, row.currency || 'USD'), 0
     );
 
     // 6. MoM gain from last 2 snapshots
