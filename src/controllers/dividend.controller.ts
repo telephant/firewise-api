@@ -71,15 +71,15 @@ export const listDividends = async (
 
       const rateMap = await getExchangeRates(Array.from(currencies));
 
-      function toUSD(amount: number, fromCurrency: string): number {
+      function toUSD(amount: number, fromCurrency: string): number | undefined {
         if (fromCurrency.toLowerCase() === 'usd') return amount;
         const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
-        return result ? result.converted : amount;
+        return result?.converted;
       }
 
       const enriched = dividendList.map(d => ({
         ...d,
-        amount_usd: toUSD(d.total_amount || 0, d.currency || 'USD'),
+        amount_usd: toUSD(d.total_amount ?? 0, d.currency || 'USD'),
       }));
 
       res.json({ success: true, data: enriched });
