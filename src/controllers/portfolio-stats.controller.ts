@@ -128,7 +128,7 @@ export const getPortfolioStats = async (
     // 6. MoM gain from last 2 snapshots
     const { data: snapshots } = await supabaseAdmin
       .from('portfolio_snapshots')
-      .select('total_value, snapshot_date')
+      .select('total_value, snapshot_date, currency')
       .eq('portfolio_id', portfolioId)
       .order('snapshot_date', { ascending: false })
       .limit(2);
@@ -138,9 +138,12 @@ export const getPortfolioStats = async (
 
     if (snapshots && snapshots.length >= 2) {
       const prevSnapshot = snapshots[1];
-      mom_gain = total_value - prevSnapshot.total_value + dividend_mtd;
-      mom_gain_pct =
-        prevSnapshot.total_value > 0 ? (mom_gain / prevSnapshot.total_value) * 100 : null;
+      // Only compute mom_gain if snapshot is in USD (cannot reliably compare different currencies)
+      if ((prevSnapshot.currency || '').toUpperCase() === 'USD') {
+        mom_gain = total_value - prevSnapshot.total_value + dividend_mtd;
+        mom_gain_pct =
+          prevSnapshot.total_value > 0 ? (mom_gain / prevSnapshot.total_value) * 100 : null;
+      }
     }
 
     const stats: PortfolioStats = {

@@ -334,6 +334,23 @@ export const getAnalytics = async (
 
     // Use SPY date calendar so portfolio returns align with SPY returns for Beta calculation
     const portfolioReturns = computePortfolioReturns(histories, spyDates);
+
+    // DEBUG
+    if (portfolioReturns.length > 0) {
+      const mean = portfolioReturns.reduce((a, b) => a + b, 0) / portfolioReturns.length;
+      const variance = portfolioReturns.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / (portfolioReturns.length - 1);
+      const std = Math.sqrt(variance);
+      console.log('[sharpe debug]', {
+        n: portfolioReturns.length,
+        mean: (mean * 100).toFixed(4) + '%',
+        std: (std * 100).toFixed(4) + '%',
+        annualReturn: (mean * 252 * 100).toFixed(2) + '%',
+        annualVol: (std * Math.sqrt(252) * 100).toFixed(2) + '%',
+        sharpe: (((mean - 0.04/252) / std) * Math.sqrt(252)).toFixed(4),
+        coveredWeight: coveredWeight.toFixed(4),
+        holdings: histories.map(h => ({ w: h.weight.toFixed(3), n: h.prices.length })).filter(h => parseFloat(h.w) > 0.01),
+      });
+    }
     const { beta, alpha_annual, r_squared } = calcBetaAlpha(portfolioReturns, spyReturns);
 
     // Concentration metrics
