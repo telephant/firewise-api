@@ -57,9 +57,11 @@ export const getRealizedPL = async (
       tickerCurrency.set(trade.ticker.toUpperCase(), trade.currency || 'USD');
     }
 
-    // Fetch live prices to get authoritative currency per ticker
-    const allTickers = Array.from(positions.keys());
-    const pricesRaw = allTickers.length > 0 ? await fetchStockPrices(allTickers) : {};
+    // Fetch live prices to get authoritative currency per ticker (active positions only)
+    const activeTickers = Array.from(positions.entries())
+      .filter(([, pos]) => pos.shares > 0)
+      .map(([ticker]) => ticker);
+    const pricesRaw = activeTickers.length > 0 ? await fetchStockPrices(activeTickers) : {};
     for (const [ticker, priceData] of Object.entries(pricesRaw)) {
       if (priceData.currency) tickerCurrency.set(ticker.toUpperCase(), priceData.currency);
     }

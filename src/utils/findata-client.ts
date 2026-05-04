@@ -157,7 +157,7 @@ export async function fetchStockPrices(tickers: string[]): Promise<Record<string
     const data = await response.json() as { success: boolean; data: Record<string, StockPrice> };
 
     for (const [ticker, price] of Object.entries(data.data)) {
-      results[ticker] = price;
+      results[ticker.toUpperCase()] = price;
       setCached(`price:${ticker}`, price, TTL.PRICE);
     }
 
