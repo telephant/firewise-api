@@ -2,15 +2,17 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { getViewContext } from '../utils/family-context';
-import { getUserPreferences, getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
+import { computePositions } from '../utils/portfolio-calc';
+import { Trade, Dividend } from '../types/portfolio';
 import * as findata from '../utils/findata-client';
 
 /**
  * Dividend Calendar Controller
  *
  * Returns dividend calendar data with:
- * - Actual dividends from DB
- * - Forecasted dividends from findata service (via yfinance)
+ * - Actual dividends from dividends table
+ * - Forecasted dividends from findata service (via yfinance), for current holdings
  */
 
 type ScheduleFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
@@ -24,7 +26,7 @@ interface MonthDividend {
   isForecasted: boolean;
   date?: string;
   frequency?: ScheduleFrequency | null;
-  market?: string | null; // 'US', 'SG', etc.
+  market?: string | null;
 }
 
 interface MonthData {
@@ -35,8 +37,8 @@ interface MonthData {
 }
 
 interface TaxRates {
-  us: number; // US dividend withholding rate
-  sg: number; // SG dividend withholding rate
+  us: number;
+  sg: number;
 }
 
 interface DividendCalendarResponse {
@@ -45,20 +47,11 @@ interface DividendCalendarResponse {
   annualTotal: number;
   currency: string;
   taxRate: number; // @deprecated - use taxRates instead
-  taxRates: TaxRates; // Tax rates by market
-  // Debug info
-  debug?: {
-    stockCount: number;
-    dividendCount: number;
-    historicalCount: number;
-  };
+  taxRates: TaxRates;
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/**
- * Map findata frequency to ScheduleFrequency
- */
 function mapFrequency(freq: string | null): ScheduleFrequency | null {
   if (!freq) return null;
   const freqMap: Record<string, ScheduleFrequency> = {
@@ -72,7 +65,7 @@ function mapFrequency(freq: string | null): ScheduleFrequency | null {
 /**
  * GET /api/fire/dividend-calendar
  *
- * Get dividend calendar data for a specific year
+ * Get dividend calendar data for a specific year, aggregated across all portfolios.
  */
 export const getDividendCalendar = async (
   req: AuthenticatedRequest,
@@ -83,12 +76,7 @@ export const getDividendCalendar = async (
     const viewContext = await getViewContext(req);
     const year = parseInt(req.query.year as string) || new Date().getFullYear();
 
-    // Get user preferences for currency
-    const preferences = await getUserPreferences(userId);
-    const preferredCurrency = preferences?.preferred_currency || 'USD';
-    const shouldConvert = preferences?.convert_all_to_preferred || false;
-
-    // Always get user's tax settings for frontend calculation
+    // Tax settings
     const { data: taxSettings } = await supabaseAdmin
       .from('user_tax_settings')
       .select('us_dividend_withholding_rate, sg_dividend_withholding_rate')
@@ -96,12 +84,12 @@ export const getDividendCalendar = async (
       .single();
 
     const taxRates: TaxRates = {
-      us: taxSettings?.us_dividend_withholding_rate ?? 0.30, // Default 30%
-      sg: taxSettings?.sg_dividend_withholding_rate ?? 0.00, // Default 0%
+      us: taxSettings?.us_dividend_withholding_rate ?? 0.30,
+      sg: taxSettings?.sg_dividend_withholding_rate ?? 0.00,
     };
-    const taxRate = taxRates.us; // Keep for backwards compatibility
+    const taxRate = taxRates.us;
 
-    // Initialize months data
+    // Initialize months
     const months: MonthData[] = MONTH_NAMES.map((name, index) => ({
       month: index,
       name,
@@ -109,65 +97,63 @@ export const getDividendCalendar = async (
       total: 0,
     }));
 
-    // 1. Get user's stock and ETF holdings
-    let assetsQuery = supabaseAdmin
-      .from('assets')
-      .select('*')
-      .in('type', ['stock', 'etf'])
-      .not('ticker', 'is', null);
-    assetsQuery = assetsQuery.eq('belong_id', viewContext.belongId);
+    // 1. Get all portfolios for this family
+    const { data: portfolios, error: portfoliosError } = await supabaseAdmin
+      .from('portfolios')
+      .select('id, currency')
+      .eq('belong_id', viewContext.belongId);
 
-    const { data: stockAssets, error: assetsError } = await assetsQuery;
-
-    if (assetsError) {
-      console.error('Failed to fetch assets:', assetsError);
-      res.status(500).json({ success: false, error: 'Failed to fetch assets' });
+    if (portfoliosError) {
+      console.error('Failed to fetch portfolios:', portfoliosError);
+      res.status(500).json({ success: false, error: 'Failed to fetch portfolios' });
       return;
     }
 
-    if (!stockAssets || stockAssets.length === 0) {
+    if (!portfolios || portfolios.length === 0) {
       res.json({
         success: true,
-        data: { year, months, annualTotal: 0, currency: preferredCurrency, taxRate, taxRates },
+        data: { year, months, annualTotal: 0, currency: 'USD', taxRate, taxRates },
       });
       return;
     }
 
-    // 2. Get actual dividends for the year from DB
-    let dividendsQuery = supabaseAdmin
-      .from('transactions')
-      .select('*')
-      .eq('type', 'income')
-      .eq('category', 'dividend')
-      .gte('date', `${year}-01-01`)
-      .lte('date', `${year}-12-31`);
-    dividendsQuery = dividendsQuery.eq('belong_id', viewContext.belongId);
+    const portfolioIds = portfolios.map((p) => p.id);
 
-    const { data: actualDividends, error: dividendsError } = await dividendsQuery;
+    // 2. Get actual dividends for the year across all portfolios
+    const { data: actualDividends, error: dividendsError } = await supabaseAdmin
+      .from('dividends')
+      .select('*')
+      .in('portfolio_id', portfolioIds)
+      .gte('ex_date', `${year}-01-01`)
+      .lte('ex_date', `${year}-12-31`);
 
     if (dividendsError) {
       console.error('Failed to fetch dividends:', dividendsError);
     }
 
-    // 3. Collect currencies and get exchange rates
-    const assetMap = new Map(stockAssets.map((a) => [a.id, a]));
+    // 3. Get all trades across all portfolios (for computing current holdings for forecasts)
+    const { data: allTrades, error: tradesError } = await supabaseAdmin
+      .from('trades')
+      .select('*')
+      .in('portfolio_id', portfolioIds)
+      .order('date', { ascending: true });
+
+    if (tradesError) {
+      console.error('Failed to fetch trades:', tradesError);
+    }
+
+    // 4. Determine preferred currency (use first portfolio's currency, or USD)
+    const preferredCurrency = portfolios[0]?.currency || 'USD';
+
+    // Collect currencies for exchange rate lookup
     const currencies = new Set<string>([preferredCurrency.toLowerCase()]);
+    (actualDividends || []).forEach((d) => currencies.add((d.currency || 'USD').toLowerCase()));
 
-    // Collect currencies from actual dividends
-    actualDividends?.forEach((t) => {
-      currencies.add((t.currency || 'USD').toLowerCase());
-    });
+    // For now: no currency conversion (return in original currency, same as dividends table)
+    const rateMap = new Map<string, number>();
 
-    // Collect currencies from stock assets (for forecasts)
-    stockAssets.forEach((a) => {
-      currencies.add((a.currency || 'USD').toLowerCase());
-    });
-
-    const rateMap = shouldConvert ? await getExchangeRates(Array.from(currencies)) : new Map<string, number>();
-
-    // Helper to convert amount
-    const convertToPreferred = (amount: number, fromCurrency: string): { amount: number; original: number; originalCurrency: string } => {
-      if (!shouldConvert || fromCurrency.toLowerCase() === preferredCurrency.toLowerCase()) {
+    const convertToPreferred = (amount: number, fromCurrency: string) => {
+      if (fromCurrency.toLowerCase() === preferredCurrency.toLowerCase()) {
         return { amount, original: amount, originalCurrency: fromCurrency };
       }
       const result = convertAmount(amount, fromCurrency, preferredCurrency, rateMap);
@@ -178,125 +164,78 @@ export const getDividendCalendar = async (
       };
     };
 
-    // 5. Add actual dividends from DB to months (return GROSS amount, frontend applies tax)
-    actualDividends?.forEach((t) => {
-      const month = new Date(t.date).getMonth();
-      const asset = assetMap.get(t.source_asset_id) || assetMap.get(t.asset_id);
-      const ticker = (t.metadata?.ticker as string) || asset?.ticker || 'Unknown';
-      const dividendCurrency = t.currency || 'USD';
-
-      // Calculate GROSS amount from metadata (t.amount is NET after tax)
-      // GROSS = NET + tax_withheld, or = dividend_per_share * share_count
-      let grossAmount = t.amount;
-      const taxWithheld = t.metadata?.tax_withheld as number | undefined;
-      const dividendPerShare = t.metadata?.dividend_per_share as number | undefined;
-      const shareCount = t.metadata?.share_count as number | undefined;
-
-      if (dividendPerShare && shareCount) {
-        // Preferred: calculate from per-share amount
-        grossAmount = dividendPerShare * shareCount;
-      } else if (taxWithheld && taxWithheld > 0) {
-        // Fallback: add back the tax
-        grossAmount = t.amount + taxWithheld;
-      }
-
-      const converted = convertToPreferred(grossAmount, dividendCurrency);
+    // 5. Add actual dividends to months (gross amount; frontend applies tax)
+    (actualDividends || []).forEach((d: Dividend) => {
+      const month = new Date(d.ex_date).getMonth();
+      const converted = convertToPreferred(d.total_amount, d.currency);
 
       months[month].dividends.push({
-        ticker,
-        assetId: t.source_asset_id || t.asset_id || '',
+        ticker: d.ticker,
+        assetId: d.portfolio_id, // use portfolio_id as reference
         amount: converted.amount,
-        originalAmount: shouldConvert ? converted.original : undefined,
-        originalCurrency: shouldConvert ? converted.originalCurrency : undefined,
         isForecasted: false,
-        date: t.date,
-        market: asset?.market || null,
+        date: d.ex_date,
       });
       months[month].total += converted.amount;
     });
 
-    // Track which months already have DB dividends per ticker
+    // Track which months already have actual dividends per ticker (to avoid double-counting with forecasts)
     const receivedMonthsByTicker = new Map<string, Set<number>>();
-    actualDividends?.forEach((t) => {
-      const asset = assetMap.get(t.source_asset_id) || assetMap.get(t.asset_id);
-      const ticker = (t.metadata?.ticker as string) || asset?.ticker;
-      if (ticker) {
-        if (!receivedMonthsByTicker.has(ticker)) {
-          receivedMonthsByTicker.set(ticker, new Set());
-        }
-        receivedMonthsByTicker.get(ticker)!.add(new Date(t.date).getMonth());
+    (actualDividends || []).forEach((d: Dividend) => {
+      if (!receivedMonthsByTicker.has(d.ticker)) {
+        receivedMonthsByTicker.set(d.ticker, new Set());
       }
+      receivedMonthsByTicker.get(d.ticker)!.add(new Date(d.ex_date).getMonth());
     });
 
-    // 6. Fetch dividend forecasts from findata for all stocks
-    const tickersWithBalance = stockAssets
-      .filter((s) => s.ticker && s.balance > 0)
-      .map((s) => s.ticker!);
+    // 6. Compute current holdings from trades for forecasting
+    const tradeList: Trade[] = (allTrades || []) as Trade[];
+    const positions = computePositions(tradeList);
+    const activePositions = Array.from(positions.entries())
+      .filter(([, pos]) => pos.shares > 0 && pos.shares > 0.0001);
 
-    if (tickersWithBalance.length > 0) {
-      const dividendData = await findata.fetchDividendsBatch(tickersWithBalance, year);
+    if (activePositions.length > 0) {
+      const activeTickers = activePositions.map(([ticker]) => ticker);
+      const dividendData = await findata.fetchDividendsBatch(activeTickers, year);
 
-      // Process findata dividends (both actual and forecasted)
-      for (const stock of stockAssets) {
-        if (!stock.ticker || stock.balance <= 0) continue;
-
-        const tickerData = dividendData[stock.ticker];
+      for (const [ticker, pos] of activePositions) {
+        const tickerData = dividendData[ticker];
         if (!tickerData || !tickerData.has_dividends) continue;
 
-        const stockCurrency = tickerData.currency || stock.currency || 'USD';
+        const stockCurrency = tickerData.currency || 'USD';
         const frequency = mapFrequency(tickerData.frequency);
-        const receivedMonths = receivedMonthsByTicker.get(stock.ticker) || new Set();
+        const receivedMonths = receivedMonthsByTicker.get(ticker) || new Set();
 
-        // Process each dividend event from findata
         for (const div of tickerData.dividends) {
-          // Skip if this month already has a DB dividend for this ticker
           if (receivedMonths.has(div.month)) continue;
-
-          // Only include forecasted dividends from findata
-          // (actual dividends come from DB above)
           if (!div.is_forecasted) continue;
 
-          const forecastedAmount = div.amount * stock.balance;
+          const forecastedAmount = div.amount * pos.shares;
           const converted = convertToPreferred(forecastedAmount, stockCurrency);
 
           months[div.month].dividends.push({
-            ticker: stock.ticker,
-            assetId: stock.id,
+            ticker,
+            assetId: '',
             amount: converted.amount,
-            originalAmount: shouldConvert ? converted.original : undefined,
-            originalCurrency: shouldConvert ? converted.originalCurrency : undefined,
             isForecasted: true,
             frequency,
-            market: stock.market || null,
+            market: null,
           });
           months[div.month].total += converted.amount;
         }
       }
     }
 
-    // 6. Sort dividends within each month
+    // 7. Sort dividends within each month
     months.forEach((m) => {
       m.dividends.sort((a, b) => a.ticker.localeCompare(b.ticker));
     });
 
-    // 7. Calculate annual total
     const annualTotal = months.reduce((sum, m) => sum + m.total, 0);
 
     res.json({
       success: true,
-      data: {
-        year,
-        months,
-        annualTotal,
-        currency: shouldConvert ? preferredCurrency : 'USD',
-        taxRate,
-        taxRates,
-        debug: {
-          stockCount: stockAssets?.length || 0,
-          dividendCount: actualDividends?.length || 0,
-          historicalCount: 0, // No longer used - findata handles pattern detection
-        },
-      },
+      data: { year, months, annualTotal, currency: preferredCurrency, taxRate, taxRates },
     });
   } catch (err) {
     console.error('getDividendCalendar error:', err);
