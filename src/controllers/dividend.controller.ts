@@ -4,6 +4,7 @@ import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
 import { Dividend } from '../types/portfolio';
+import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 /**
  * Verify that a portfolio belongs to the current user/family context.
@@ -61,7 +62,31 @@ export const listDividends = async (
       throw new AppError('Failed to fetch dividends', 500);
     }
 
-    res.json({ success: true, data: data || [] });
+    const dividendList = data || [];
+
+    if (dividendList.length > 0) {
+      // Collect unique currencies
+      const currencies = new Set<string>(['usd']);
+      dividendList.forEach(d => currencies.add((d.currency || 'USD').toLowerCase()));
+
+      const rateMap = await getExchangeRates(Array.from(currencies));
+
+      function toUSD(amount: number, fromCurrency: string): number {
+        if (fromCurrency.toLowerCase() === 'usd') return amount;
+        const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
+        return result ? result.converted : amount;
+      }
+
+      const enriched = dividendList.map(d => ({
+        ...d,
+        amount_usd: toUSD(d.total_amount || 0, d.currency || 'USD'),
+      }));
+
+      res.json({ success: true, data: enriched });
+      return;
+    }
+
+    res.json({ success: true, data: [] });
   } catch (err) {
     if (err instanceof AppError) {
       res.status(err.statusCode).json({ success: false, error: err.message });
