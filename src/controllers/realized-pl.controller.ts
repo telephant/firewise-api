@@ -3,7 +3,9 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
+import { fetchStockPrices } from '../utils/findata-client';
 import { computePositions } from '../utils/portfolio-calc';
+import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 import { Trade } from '../types/portfolio';
 
 interface RealizedPLItem {
@@ -49,6 +51,31 @@ export const getRealizedPL = async (
     // Compute positions
     const positions = computePositions(tradeList);
 
+    // Build ticker→currency map from trades (findata will override below)
+    const tickerCurrency = new Map<string, string>();
+    for (const trade of tradeList) {
+      tickerCurrency.set(trade.ticker.toUpperCase(), trade.currency || 'USD');
+    }
+
+    // Fetch live prices to get authoritative currency per ticker
+    const allTickers = Array.from(positions.keys());
+    const pricesRaw = allTickers.length > 0 ? await fetchStockPrices(allTickers) : {};
+    for (const [ticker, priceData] of Object.entries(pricesRaw)) {
+      if (priceData.currency) tickerCurrency.set(ticker.toUpperCase(), priceData.currency);
+    }
+
+    // Fetch exchange rates for all involved currencies → USD
+    const allCurrencies = new Set<string>(['usd']);
+    tickerCurrency.forEach(c => allCurrencies.add(c.toLowerCase()));
+    const rateMap = await getExchangeRates(Array.from(allCurrencies));
+
+    // Convert any amount to USD; fallback to original if rate missing
+    function toUSD(amount: number, fromCurrency: string): number {
+      if (fromCurrency.toLowerCase() === 'usd') return amount;
+      const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
+      return result ? result.converted : amount;
+    }
+
     // Build trade count per ticker
     const tradeCountMap = new Map<string, number>();
     for (const trade of tradeList) {
@@ -56,13 +83,14 @@ export const getRealizedPL = async (
       tradeCountMap.set(key, (tradeCountMap.get(key) || 0) + 1);
     }
 
-    // Collect positions with realized_pl !== 0
+    // Collect positions with realized_pl !== 0, converting to USD
     const result: RealizedPLItem[] = [];
     for (const [ticker, pos] of positions) {
       if (pos.realized_pl !== 0) {
+        const tickerCurr = tickerCurrency.get(ticker) || 'USD';
         result.push({
           ticker,
-          realized_pl: pos.realized_pl,
+          realized_pl: toUSD(pos.realized_pl, tickerCurr),
           trade_count: tradeCountMap.get(ticker) || 0,
         });
       }
