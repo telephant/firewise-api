@@ -130,8 +130,8 @@ const getAssets = async (req, res) => {
             .from('assets')
             .select('*', { count: 'exact' })
             .order(sortField, { ascending });
-        // Apply ownership filter (family or personal)
-        query = (0, family_context_1.applyOwnershipFilter)(query, viewContext);
+        // Apply ownership filter
+        query = query.eq('belong_id', viewContext.belongId);
         if (type) {
             query = query.eq('type', type);
         }
@@ -190,7 +190,7 @@ const getDefaultCashAccount = async (req, res) => {
             .eq('type', 'cash')
             .order('created_at', { ascending: true })
             .limit(1);
-        query = (0, family_context_1.applyOwnershipFilter)(query, viewContext);
+        query = query.eq('belong_id', viewContext.belongId);
         const { data: assets, error } = await query;
         if (error) {
             throw new error_1.AppError('Failed to fetch default cash account', 500);
@@ -224,9 +224,12 @@ const getAsset = async (req, res) => {
         const viewContext = await (0, family_context_1.getViewContext)(req);
         const { id } = req.params;
         // Build query with family/personal context
-        let query = supabase_1.supabaseAdmin.from('assets').select('*');
-        query = (0, family_context_1.applyOwnershipFilterWithId)(query, id, viewContext);
-        const { data: asset, error } = await query.single();
+        const { data: asset, error } = await supabase_1.supabaseAdmin
+            .from('assets')
+            .select('*')
+            .eq('id', id)
+            .eq('belong_id', viewContext.belongId)
+            .single();
         if (error || !asset) {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
@@ -280,9 +283,7 @@ const createAsset = async (req, res) => {
         let ownershipValues;
         if (belong_id) {
             // Use explicitly provided belong_id (must be user's own ID or their family ID)
-            const validBelongIds = [userId];
-            if (viewContext.familyId)
-                validBelongIds.push(viewContext.familyId);
+            const validBelongIds = [userId, viewContext.familyId];
             if (!validBelongIds.includes(belong_id)) {
                 res.status(400).json({ success: false, error: 'Invalid belong_id' });
                 return;
@@ -291,7 +292,7 @@ const createAsset = async (req, res) => {
         }
         else {
             // Default: use current view context
-            ownershipValues = (0, family_context_1.buildOwnershipValues)(viewContext);
+            ownershipValues = { user_id: viewContext.userId, belong_id: viewContext.belongId };
         }
         const { data: asset, error } = await supabase_1.supabaseAdmin
             .from('assets')
@@ -335,9 +336,12 @@ const updateAsset = async (req, res) => {
         const { id } = req.params;
         const { name, type, ticker, currency, market, metadata, balance, total_realized_pl } = req.body;
         // Fetch existing asset with current balance
-        let checkQuery = supabase_1.supabaseAdmin.from('assets').select('*');
-        checkQuery = (0, family_context_1.applyOwnershipFilterWithId)(checkQuery, id, viewContext);
-        const { data: existingAsset, error: fetchError } = await checkQuery.single();
+        const { data: existingAsset, error: fetchError } = await supabase_1.supabaseAdmin
+            .from('assets')
+            .select('*')
+            .eq('id', id)
+            .eq('belong_id', viewContext.belongId)
+            .single();
         if (fetchError || !existingAsset) {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
@@ -404,9 +408,12 @@ const deleteAsset = async (req, res) => {
         const viewContext = await (0, family_context_1.getViewContext)(req);
         const { id } = req.params;
         // Check if asset exists and belongs to user/family
-        let checkQuery = supabase_1.supabaseAdmin.from('assets').select('id');
-        checkQuery = (0, family_context_1.applyOwnershipFilterWithId)(checkQuery, id, viewContext);
-        const { data: existingAsset, error: fetchError } = await checkQuery.single();
+        const { data: existingAsset, error: fetchError } = await supabase_1.supabaseAdmin
+            .from('assets')
+            .select('id')
+            .eq('id', id)
+            .eq('belong_id', viewContext.belongId)
+            .single();
         if (fetchError || !existingAsset) {
             res.status(404).json({ success: false, error: 'Asset not found' });
             return;
@@ -439,9 +446,10 @@ const getAssetTypeStats = async (req, res) => {
         const prefs = await (0, currency_conversion_1.getUserPreferences)(userId);
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Build query with family/personal context
-        let query = supabase_1.supabaseAdmin.from('assets').select('*');
-        query = (0, family_context_1.applyOwnershipFilter)(query, viewContext);
-        const { data: assets, error } = await query;
+        const { data: assets, error } = await supabase_1.supabaseAdmin
+            .from('assets')
+            .select('*')
+            .eq('belong_id', viewContext.belongId);
         if (error) {
             throw new error_1.AppError('Failed to fetch assets', 500);
         }
@@ -504,10 +512,15 @@ const getNetWorthStats = async (req, res) => {
         const preferredCurrency = prefs?.preferred_currency || 'USD';
         // Build queries with family/personal context
         // Include metadata for metals (needed for metal_type and metal_unit)
-        let assetsQuery = supabase_1.supabaseAdmin.from('assets').select('id, type, ticker, balance, currency, metadata');
-        assetsQuery = (0, family_context_1.applyOwnershipFilter)(assetsQuery, viewContext);
-        let debtsQuery = supabase_1.supabaseAdmin.from('debts').select('id, current_balance, currency, status').eq('status', 'active');
-        debtsQuery = (0, family_context_1.applyOwnershipFilter)(debtsQuery, viewContext);
+        const assetsQuery = supabase_1.supabaseAdmin
+            .from('assets')
+            .select('id, type, ticker, balance, currency, metadata')
+            .eq('belong_id', viewContext.belongId);
+        const debtsQuery = supabase_1.supabaseAdmin
+            .from('debts')
+            .select('id, current_balance, currency, status')
+            .eq('status', 'active')
+            .eq('belong_id', viewContext.belongId);
         // Fetch all assets and debts in parallel
         const [assetsResult, debtsResult] = await Promise.all([
             assetsQuery,

@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
-import { fetchStockPrices } from '../utils/findata-client';
+import { fetchStockPrices, fetchDividendsBatch } from '../utils/findata-client';
 import { buildHoldings, computePositions } from '../utils/portfolio-calc';
 import { Holding, Trade } from '../types/portfolio';
 import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
@@ -53,8 +53,11 @@ export const getHoldings = async (
       .filter(([, pos]) => pos.shares > 0)
       .map(([ticker]) => ticker);
 
-    // 4. Batch fetch prices from findata
-    const pricesRaw = await fetchStockPrices(activeTickers);
+    // 4. Batch fetch prices + dividend data (for next_ex_date) from findata
+    const [pricesRaw, dividendData] = await Promise.all([
+      fetchStockPrices(activeTickers),
+      fetchDividendsBatch(activeTickers),
+    ]);
 
     // Build priceMap in the format buildHoldings expects
     const priceMap: Record<string, { price: number | null; currency: string }> = {};
@@ -93,6 +96,7 @@ export const getHoldings = async (
     const enriched = holdings.map(h => ({
       ...h,
       value_usd: h.value !== null ? toUSD(h.value, h.currency) : undefined,
+      next_ex_date: dividendData[h.ticker]?.next_ex_date ?? null,
     }));
 
     res.json({ success: true, data: enriched });

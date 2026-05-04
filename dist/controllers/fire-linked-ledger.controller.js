@@ -14,10 +14,13 @@ const getFireLinkedLedgers = async (req, res) => {
         }
         // Get view context for family/personal mode
         const viewContext = await (0, family_context_1.getViewContext)(req);
-        const { data: linkedLedgers, error } = await (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('fire_linked_ledgers').select(`
+        const { data: linkedLedgers, error } = await supabase_1.supabaseAdmin
+            .from('fire_linked_ledgers')
+            .select(`
         *,
         ledger:ledgers(id, name, description)
-      `), viewContext);
+      `)
+            .eq('belong_id', viewContext.belongId);
         if (error) {
             console.error('Error fetching fire linked ledgers:', error);
             throw new error_1.AppError('Failed to fetch linked ledgers', 500);
@@ -69,9 +72,9 @@ const setFireLinkedLedgers = async (req, res) => {
             return;
         }
         // Insert new links with ownership values
-        const ownershipValues = (0, family_context_1.buildOwnershipValues)(viewContext);
         const inserts = ledger_ids.map((ledger_id) => ({
-            ...ownershipValues,
+            user_id: viewContext.userId,
+            belong_id: viewContext.belongId,
             ledger_id,
         }));
         const { data: newLinks, error: insertError } = await supabase_1.supabaseAdmin

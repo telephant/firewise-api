@@ -36,14 +36,17 @@ const getExpenseStats = async (req, res) => {
         const preferredCurrency = userPrefs?.preferred_currency || 'USD';
         const shouldConvert = userPrefs?.convert_all_to_preferred || false;
         // Build transactions query with family/personal context (using simple belong_id filter)
-        const transactionsQuery = (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('transactions').select(`
+        const transactionsQuery = supabase_1.supabaseAdmin
+            .from('transactions')
+            .select(`
         type,
         amount,
         currency,
         date,
         expense_category_id,
         expense_category:flow_expense_categories(id, name, icon)
-      `), viewContext)
+      `)
+            .eq('belong_id', viewContext.belongId)
             .in('type', ['expense', 'income'])
             .gte('date', formatDate(sixMonthsAgoStart))
             .lte('date', formatDate(currentMonthEnd));
@@ -51,7 +54,10 @@ const getExpenseStats = async (req, res) => {
         // This is more efficient than multiple queries
         const [transactionsResult, linkedLedgersResult] = await Promise.all([
             transactionsQuery,
-            (0, family_context_1.applyOwnershipFilter)(supabase_1.supabaseAdmin.from('fire_linked_ledgers').select('ledger_id'), viewContext),
+            supabase_1.supabaseAdmin
+                .from('fire_linked_ledgers')
+                .select('ledger_id')
+                .eq('belong_id', viewContext.belongId),
         ]);
         if (transactionsResult.error) {
             console.error('Error fetching transactions:', transactionsResult.error);

@@ -57,7 +57,6 @@ const user_tax_settings_routes_1 = __importDefault(require("./user-tax-settings.
 const asset_interest_settings_routes_1 = __importDefault(require("./asset-interest-settings.routes"));
 const user_preferences_routes_1 = __importDefault(require("./user-preferences.routes"));
 const debt_routes_1 = __importDefault(require("./debt.routes"));
-const recurring_schedule_routes_1 = __importDefault(require("./recurring-schedule.routes"));
 const flow_freedom_routes_1 = __importDefault(require("./flow-freedom.routes"));
 const runway_routes_1 = __importDefault(require("./runway.routes"));
 const asset_import_routes_1 = __importDefault(require("./asset-import.routes"));
@@ -76,7 +75,10 @@ const trade_routes_1 = __importDefault(require("./trade.routes"));
 const holding_routes_1 = __importDefault(require("./holding.routes"));
 const dividend_routes_1 = __importDefault(require("./dividend.routes"));
 const portfolio_stats_routes_1 = __importDefault(require("./portfolio-stats.routes"));
-const portfolio_family_routes_1 = __importDefault(require("./portfolio-family.routes"));
+const exchange_rate_routes_1 = __importDefault(require("./exchange-rate.routes"));
+const realized_pl_routes_1 = __importDefault(require("./realized-pl.routes"));
+const dca_routes_1 = __importDefault(require("./dca.routes"));
+const commodity_routes_1 = __importDefault(require("./commodity.routes"));
 const router = (0, express_1.Router)();
 // Auth routes
 router.use('/auth', auth_routes_1.default);
@@ -102,7 +104,6 @@ router.use('/fire/tax-settings', user_tax_settings_routes_1.default);
 router.use('/fire/asset-interest-settings', asset_interest_settings_routes_1.default);
 router.use('/fire/user-preferences', user_preferences_routes_1.default);
 router.use('/fire/debts', debt_routes_1.default);
-router.use('/fire/recurring-schedules', recurring_schedule_routes_1.default);
 router.use('/fire/flow-freedom', flow_freedom_routes_1.default);
 router.use('/fire/runway', runway_routes_1.default);
 router.use('/fire/assets/import', asset_import_routes_1.default);
@@ -119,11 +120,14 @@ router.use('/fire/monthly-summary', monthly_summary_routes_1.default);
 router.use('/fire/snapshots', monthly_snapshot_routes_1.default);
 router.use('/fire/performance', performance_routes_1.default);
 // Portfolio tracker routes
+router.use('/fire/dca', dca_routes_1.default);
+router.use('/fire/commodities', commodity_routes_1.default);
 router.use('/portfolios', portfolio_routes_1.default);
 router.use('/portfolios', trade_routes_1.default);
 router.use('/portfolios', holding_routes_1.default);
 router.use('/portfolios', dividend_routes_1.default);
 router.use('/portfolios', portfolio_stats_routes_1.default);
-router.use('/family', portfolio_family_routes_1.default);
+router.use('/exchange-rates', exchange_rate_routes_1.default);
+router.use('/portfolios', realized_pl_routes_1.default);
 exports.default = router;
 //# sourceMappingURL=index.js.map

@@ -16,6 +16,7 @@ export interface SavingsAccount {
   interest_rate: number;
   compound_frequency: 'monthly' | 'quarterly' | 'semi_annual' | 'annual';
   notes: string | null;
+  start_date: string | null;
   created_at: string;
   updated_at: string;
   // Enriched fields
@@ -23,6 +24,7 @@ export interface SavingsAccount {
   next_payout_date: string;
   next_payout_amount: number;
   total_interest_ytd: number;
+  total_interest_all: number;
 }
 
 export interface InterestRecord {
@@ -77,11 +79,12 @@ function buildForecast(
   interestRate: number,
   frequency: string,
   lastCreditedAt: string | null,
+  startDate: string | null,
   createdAt: string,
   periods = 12
 ): ForecastPeriod[] {
   const payoutAmount = computeForecast(balance, interestRate, frequency);
-  const baseDate = lastCreditedAt ?? createdAt.slice(0, 10);
+  const baseDate = lastCreditedAt ?? startDate ?? createdAt.slice(0, 10);
   const result: ForecastPeriod[] = [];
   let currentDate = baseDate;
   for (let i = 1; i <= periods; i++) {
@@ -127,20 +130,21 @@ export const listAccounts = async (
     const enriched: SavingsAccount[] = (accounts || []).map((a: {
       id: string; belong_id: string; name: string; bank: string | null;
       currency: string; balance: number; interest_rate: number;
-      compound_frequency: string; notes: string | null;
+      compound_frequency: string; notes: string | null; start_date: string | null;
       created_at: string; updated_at: string;
     }) => {
       const acctRecords = allRecords.filter(r => r.account_id === a.id);
       const sorted = [...acctRecords].sort((x, y) => y.credited_at.localeCompare(x.credited_at));
       const lastCreditedAt = sorted[0]?.credited_at ?? null;
       const nextPayoutDate = computeNextPayoutDate(
-        lastCreditedAt ?? a.created_at.slice(0, 10),
+        lastCreditedAt ?? a.start_date ?? a.created_at.slice(0, 10),
         a.compound_frequency
       );
       const nextPayoutAmount = computeForecast(a.balance, a.interest_rate, a.compound_frequency);
       const totalInterestYtd = acctRecords
         .filter(r => new Date(r.credited_at).getFullYear() === currentYear)
         .reduce((sum, r) => sum + r.amount, 0);
+      const totalInterestAll = acctRecords.reduce((sum, r) => sum + r.amount, 0);
 
       return {
         ...a,
@@ -149,6 +153,7 @@ export const listAccounts = async (
         next_payout_date: nextPayoutDate,
         next_payout_amount: nextPayoutAmount,
         total_interest_ytd: totalInterestYtd,
+        total_interest_all: totalInterestAll,
       };
     });
 
@@ -169,7 +174,7 @@ export const createAccount = async (
 ): Promise<void> => {
   try {
     const ctx = await getViewContext(req);
-    const { name, bank, currency, balance, interest_rate, compound_frequency, notes } = req.body;
+    const { name, bank, currency, balance, interest_rate, compound_frequency, notes, start_date } = req.body;
 
     if (!name || balance === undefined || interest_rate === undefined) {
       throw new AppError('name, balance, and interest_rate are required', 400);
@@ -186,6 +191,7 @@ export const createAccount = async (
         interest_rate: Number(interest_rate),
         compound_frequency: compound_frequency || 'monthly',
         notes: notes || null,
+        start_date: start_date || null,
       })
       .select()
       .single();
@@ -197,9 +203,10 @@ export const createAccount = async (
       data: {
         ...data,
         last_credited_at: null,
-        next_payout_date: computeNextPayoutDate(data.created_at.slice(0, 10), data.compound_frequency),
+        next_payout_date: computeNextPayoutDate(data.start_date ?? data.created_at.slice(0, 10), data.compound_frequency),
         next_payout_amount: computeForecast(data.balance, data.interest_rate, data.compound_frequency),
         total_interest_ytd: 0,
+        total_interest_all: 0,
       },
     });
   } catch (err) {
@@ -219,7 +226,7 @@ export const updateAccount = async (
   try {
     const ctx = await getViewContext(req);
     const { id } = req.params;
-    const { name, bank, currency, balance, interest_rate, compound_frequency, notes } = req.body;
+    const { name, bank, currency, balance, interest_rate, compound_frequency, notes, start_date } = req.body;
 
     const { data: existing } = await supabaseAdmin
       .from('savings_accounts')
@@ -238,6 +245,7 @@ export const updateAccount = async (
     if (interest_rate !== undefined) updates.interest_rate = Number(interest_rate);
     if (compound_frequency !== undefined) updates.compound_frequency = compound_frequency;
     if (notes !== undefined) updates.notes = notes || null;
+    if (start_date !== undefined) updates.start_date = start_date || null;
 
     const { error } = await supabaseAdmin
       .from('savings_accounts')
@@ -323,6 +331,7 @@ export const listInterest = async (
       account.interest_rate,
       account.compound_frequency,
       lastCreditedAt,
+      account.start_date ?? null,
       account.created_at,
       12
     );

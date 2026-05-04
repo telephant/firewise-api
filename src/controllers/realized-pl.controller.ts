@@ -71,11 +71,15 @@ export const getRealizedPL = async (
     tickerCurrency.forEach(c => allCurrencies.add(c.toLowerCase()));
     const rateMap = await getExchangeRates(Array.from(allCurrencies));
 
-    // Convert any amount to USD; fallback to original if rate missing
+    // Convert any amount to USD; returns 0 if rate missing (never silently return native amount as USD)
     function toUSD(amount: number, fromCurrency: string): number {
       if (fromCurrency.toLowerCase() === 'usd') return amount;
       const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
-      return result ? result.converted : amount;
+      if (!result) {
+        console.warn(`[realized-pl] Missing exchange rate for ${fromCurrency} → USD; treating as 0`);
+        return 0;
+      }
+      return result.converted;
     }
 
     // Build trade count per ticker

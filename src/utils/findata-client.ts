@@ -39,6 +39,7 @@ interface DividendData {
   dividends: DividendEvent[];
   annual_total_per_share: number;
   currency: string;
+  next_ex_date: string | null; // ISO date e.g. "2025-06-15", null if unknown
 }
 
 interface CAGRData {

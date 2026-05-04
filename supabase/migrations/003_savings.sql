@@ -27,3 +27,5 @@ CREATE TABLE interest_records (
 );
 
 CREATE INDEX interest_records_account_id_idx ON interest_records(account_id);
+
+ALTER TABLE savings_accounts ADD COLUMN start_date DATE;
