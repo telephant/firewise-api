@@ -43,7 +43,8 @@ export const getExchangeRates = async (
       rateMap.set((row.code as string).toUpperCase(), row.rate as number);
     }
 
-    const baseRate = rateMap.get(base);
+    // USD is the reference currency (rate = 1); it may not be in the DB
+    const baseRate = base === 'USD' ? 1 : rateMap.get(base);
     if (baseRate == null) {
       throw new AppError(`Base currency "${base}" not found`, 404);
     }
