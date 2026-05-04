@@ -162,7 +162,7 @@ export const getDividendCalendar = async (
     const tradeList: Trade[] = (allTrades || []) as Trade[];
     const positions = computePositions(tradeList);
     const activePositions = Array.from(positions.entries())
-      .filter(([, pos]) => pos.shares > 0 && pos.shares > 0.0001);
+      .filter(([, pos]) => pos.shares > 0.0001);
 
     // Fetch findata BEFORE building rateMap so we can include forecasted stock currencies
     let dividendData: Awaited<ReturnType<typeof findata.fetchDividendsBatch>> = {};
@@ -186,6 +186,9 @@ export const getDividendCalendar = async (
         return { amount, original: amount, originalCurrency: fromCurrency };
       }
       const result = convertAmount(amount, fromCurrency, preferredCurrency, rateMap);
+      if (!result) {
+        console.warn(`[dividend-calendar] No rate for ${fromCurrency} → ${preferredCurrency}, using unconverted amount`);
+      }
       return {
         amount: result?.converted ?? amount,
         original: amount,
@@ -208,6 +211,7 @@ export const getDividendCalendar = async (
       months[month].total += converted.amount;
     });
 
+    // 6. Add forecasted dividends to months (for current holdings, excluding already-received months)
     if (activePositions.length > 0) {
 
       for (const [ticker, pos] of activePositions) {
