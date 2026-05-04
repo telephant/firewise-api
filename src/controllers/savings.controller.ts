@@ -274,7 +274,8 @@ export const deleteAccount = async (
 
     if (!existing) throw new AppError('Savings account not found', 404);
 
-    await supabaseAdmin.from('savings_accounts').delete().eq('id', id);
+    const { error: deleteError } = await supabaseAdmin.from('savings_accounts').delete().eq('id', id);
+    if (deleteError) throw new AppError('Failed to delete savings account', 500);
 
     res.json({ success: true, data: { id } });
   } catch (err) {
@@ -346,8 +347,11 @@ export const addInterest = async (
     const { id } = req.params;
     const { amount, credited_at, notes } = req.body;
 
-    if (!amount || !credited_at) {
+    if (amount === undefined || amount === null || !credited_at) {
       throw new AppError('amount and credited_at are required', 400);
+    }
+    if (Number(amount) <= 0) {
+      throw new AppError('amount must be greater than 0', 400);
     }
 
     const { data: account } = await supabaseAdmin
@@ -396,11 +400,12 @@ export const deleteInterest = async (
 
     if (!account) throw new AppError('Savings account not found', 404);
 
-    await supabaseAdmin
+    const { error: deleteError } = await supabaseAdmin
       .from('interest_records')
       .delete()
       .eq('id', recordId)
       .eq('account_id', id);
+    if (deleteError) throw new AppError('Failed to delete interest record', 500);
 
     res.json({ success: true, data: { id: recordId } });
   } catch (err) {
