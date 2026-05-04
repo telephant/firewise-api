@@ -32,6 +32,7 @@ export interface Holding {
   avg_cost: number;
   current_price: number | null;
   value: number | null;
+  value_usd?: number;
   cost: number;
   unrealized_pl: number | null;
   unrealized_pl_pct: number | null;
