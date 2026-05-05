@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
+import { getExchangeRates, convertAmount } from '../utils/currency-conversion';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -444,14 +445,14 @@ export const getInterestTrend = async (
       .eq('belong_id', ctx.belongId);
 
     if (accErr) throw new AppError('Failed to fetch savings accounts', 500);
-    const accts = accounts || [];
+    const accts = (accounts || []) as SavingsAccount[];
 
     if (accts.length === 0) {
       res.json({ success: true, data: { months: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 })) } });
       return;
     }
 
-    const accountIds = accts.map((a: { id: string }) => a.id);
+    const accountIds = accts.map((a: SavingsAccount) => a.id);
 
     // 2. Fetch ALL interest records for these accounts (not just current year — need last credited date for forecast base)
     const { data: records } = await supabaseAdmin
@@ -463,37 +464,22 @@ export const getInterestTrend = async (
     // Filter to target year for historical map
     const yearRecords = allRecords.filter(r => new Date(r.credited_at).getFullYear() === year);
 
-    // 3. Fetch USD exchange rates for non-USD currencies
-    const ccys = [...new Set(accts.map((a: { currency: string }) => a.currency))].filter((c: string) => c !== 'USD') as string[];
-    const toUsd: Record<string, number> = { USD: 1 };
-    if (ccys.length > 0) {
-      try {
-        const url = `https://api.frankfurter.app/latest?from=USD&to=${ccys.join(',')}`;
-        const rateRes = await fetch(url);
-        const rateJson = await rateRes.json() as { rates: Record<string, number> };
-        for (const [ccy, rate] of Object.entries(rateJson.rates)) {
-          toUsd[ccy] = rate > 0 ? 1 / rate : 1;
-        }
-      } catch {
-        // fallback: treat unknown currencies as 1:1
-      }
-    }
+    // 3. Fetch USD exchange rates using DB-backed utility
+    const ccys = [...new Set(accts.map((a: SavingsAccount) => a.currency))].filter((c: string) => c !== 'USD') as string[];
+    const rateMap = ccys.length > 0 ? await getExchangeRates(ccys) : new Map<string, number>();
 
     // 4. Build historical month map (real credited records for target year)
     const histMap: Record<number, number> = {};
     for (const r of yearRecords) {
-      const acct = accts.find((a: { id: string }) => a.id === r.account_id) as { currency: string } | undefined;
-      const rate = toUsd[acct?.currency ?? 'USD'] ?? 1;
+      const acct = accts.find((a: SavingsAccount) => a.id === r.account_id);
+      const usdAmount = convertAmount(r.amount, acct?.currency ?? 'USD', 'USD', rateMap)?.converted ?? r.amount;
       const m = new Date(r.credited_at).getMonth() + 1;
-      histMap[m] = (histMap[m] ?? 0) + r.amount * rate;
+      histMap[m] = (histMap[m] ?? 0) + usdAmount;
     }
 
     // 5. Build forecast map for future months (month > currentMonth in target year)
     const forecastMap: Record<number, number> = {};
-    for (const a of accts as {
-      id: string; currency: string; balance: number; interest_rate: number;
-      compound_frequency: string; start_date: string | null; created_at: string;
-    }[]) {
+    for (const a of accts) {
       // Find last credited date across ALL time for this account
       const acctAllRecords = allRecords
         .filter(r => r.account_id === a.id)
@@ -501,7 +487,8 @@ export const getInterestTrend = async (
       const lastCreditedAt: string | null = acctAllRecords[0]?.credited_at ?? null;
 
       const baseDate = lastCreditedAt ?? a.start_date ?? a.created_at.slice(0, 10);
-      const payoutUsd = computeForecast(a.balance, a.interest_rate, a.compound_frequency) * (toUsd[a.currency] ?? 1);
+      const payoutUsd = computeForecast(a.balance, a.interest_rate, a.compound_frequency);
+      const payoutUsdConverted = convertAmount(payoutUsd, a.currency, 'USD', rateMap)?.converted ?? payoutUsd;
 
       // Walk forward up to 24 steps to collect payout months in target year that are future
       let cursor = baseDate;
@@ -512,7 +499,7 @@ export const getInterestTrend = async (
         const pMonth = d.getMonth() + 1;
         if (pYear > year) break;
         if (pYear === year && pMonth > currentMonth) {
-          forecastMap[pMonth] = (forecastMap[pMonth] ?? 0) + payoutUsd;
+          forecastMap[pMonth] = (forecastMap[pMonth] ?? 0) + payoutUsdConverted;
         }
       }
     }
