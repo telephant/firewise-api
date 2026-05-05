@@ -5,6 +5,7 @@ import {
   createAccount,
   updateAccount,
   deleteAccount,
+  getInterestTrend,
   listInterest,
   addInterest,
   deleteInterest,
@@ -17,6 +18,8 @@ router.get('/', listAccounts);
 router.post('/', createAccount);
 router.put('/:id', updateAccount);
 router.delete('/:id', deleteAccount);
+
+router.get('/interest-trend', getInterestTrend);
 
 router.get('/:id/interest', listInterest);
 router.post('/:id/interest', addInterest);
