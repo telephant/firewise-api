@@ -434,7 +434,8 @@ export const getInterestTrend = async (
 ): Promise<void> => {
   try {
     const ctx = await getViewContext(req);
-    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const parsed = parseInt(req.query.year as string);
+    const year = Number.isNaN(parsed) ? new Date().getFullYear() : parsed;
     const today = new Date();
     const currentMonth = today.getMonth() + 1; // 1-12
 
@@ -472,7 +473,11 @@ export const getInterestTrend = async (
     const histMap: Record<number, number> = {};
     for (const r of yearRecords) {
       const acct = accts.find((a: SavingsAccount) => a.id === r.account_id);
-      const usdAmount = convertAmount(r.amount, acct?.currency ?? 'USD', 'USD', rateMap)?.converted ?? r.amount;
+      const conversion = convertAmount(r.amount, acct?.currency ?? 'USD', 'USD', rateMap);
+      if (!conversion) {
+        console.warn(`[getInterestTrend] No exchange rate for currency: ${acct?.currency}`);
+      }
+      const usdAmount = conversion?.converted ?? 0;
       const m = new Date(r.credited_at).getMonth() + 1;
       histMap[m] = (histMap[m] ?? 0) + usdAmount;
     }
@@ -488,7 +493,11 @@ export const getInterestTrend = async (
 
       const baseDate = lastCreditedAt ?? a.start_date ?? a.created_at.slice(0, 10);
       const payoutUsd = computeForecast(a.balance, a.interest_rate, a.compound_frequency);
-      const payoutUsdConverted = convertAmount(payoutUsd, a.currency, 'USD', rateMap)?.converted ?? payoutUsd;
+      const payoutConversion = convertAmount(payoutUsd, a.currency, 'USD', rateMap);
+      if (!payoutConversion) {
+        console.warn(`[getInterestTrend] No exchange rate for currency: ${a.currency}`);
+      }
+      const payoutUsdConverted = payoutConversion?.converted ?? 0;
 
       // Walk forward up to 24 steps to collect payout months in target year that are future
       let cursor = baseDate;
