@@ -425,3 +425,111 @@ export const deleteInterest = async (
     res.status(500).json({ success: false, error: 'Failed to delete interest record' });
   }
 };
+
+// GET /fire/savings/interest-trend?year=YYYY
+export const getInterestTrend = async (
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse<{ months: { month: number; amount: number }[] }>>
+): Promise<void> => {
+  try {
+    const ctx = await getViewContext(req);
+    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1; // 1-12
+
+    // 1. Fetch all savings accounts for this user
+    const { data: accounts, error: accErr } = await supabaseAdmin
+      .from('savings_accounts')
+      .select('*')
+      .eq('belong_id', ctx.belongId);
+
+    if (accErr) throw new AppError('Failed to fetch savings accounts', 500);
+    const accts = accounts || [];
+
+    if (accts.length === 0) {
+      res.json({ success: true, data: { months: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 })) } });
+      return;
+    }
+
+    const accountIds = accts.map((a: { id: string }) => a.id);
+
+    // 2. Fetch ALL interest records for these accounts (not just current year — need last credited date for forecast base)
+    const { data: records } = await supabaseAdmin
+      .from('interest_records')
+      .select('account_id, amount, credited_at')
+      .in('account_id', accountIds);
+
+    const allRecords = (records || []) as { account_id: string; amount: number; credited_at: string }[];
+    // Filter to target year for historical map
+    const yearRecords = allRecords.filter(r => new Date(r.credited_at).getFullYear() === year);
+
+    // 3. Fetch USD exchange rates for non-USD currencies
+    const ccys = [...new Set(accts.map((a: { currency: string }) => a.currency))].filter((c: string) => c !== 'USD') as string[];
+    const toUsd: Record<string, number> = { USD: 1 };
+    if (ccys.length > 0) {
+      try {
+        const url = `https://api.frankfurter.app/latest?from=USD&to=${ccys.join(',')}`;
+        const rateRes = await fetch(url);
+        const rateJson = await rateRes.json() as { rates: Record<string, number> };
+        for (const [ccy, rate] of Object.entries(rateJson.rates)) {
+          toUsd[ccy] = rate > 0 ? 1 / rate : 1;
+        }
+      } catch {
+        // fallback: treat unknown currencies as 1:1
+      }
+    }
+
+    // 4. Build historical month map (real credited records for target year)
+    const histMap: Record<number, number> = {};
+    for (const r of yearRecords) {
+      const acct = accts.find((a: { id: string }) => a.id === r.account_id) as { currency: string } | undefined;
+      const rate = toUsd[acct?.currency ?? 'USD'] ?? 1;
+      const m = new Date(r.credited_at).getMonth() + 1;
+      histMap[m] = (histMap[m] ?? 0) + r.amount * rate;
+    }
+
+    // 5. Build forecast map for future months (month > currentMonth in target year)
+    const forecastMap: Record<number, number> = {};
+    for (const a of accts as {
+      id: string; currency: string; balance: number; interest_rate: number;
+      compound_frequency: string; start_date: string | null; created_at: string;
+    }[]) {
+      // Find last credited date across ALL time for this account
+      const acctAllRecords = allRecords
+        .filter(r => r.account_id === a.id)
+        .sort((x, y) => y.credited_at.localeCompare(x.credited_at));
+      const lastCreditedAt: string | null = acctAllRecords[0]?.credited_at ?? null;
+
+      const baseDate = lastCreditedAt ?? a.start_date ?? a.created_at.slice(0, 10);
+      const payoutUsd = computeForecast(a.balance, a.interest_rate, a.compound_frequency) * (toUsd[a.currency] ?? 1);
+
+      // Walk forward up to 24 steps to collect payout months in target year that are future
+      let cursor = baseDate;
+      for (let i = 0; i < 24; i++) {
+        cursor = computeNextPayoutDate(cursor, a.compound_frequency);
+        const d = new Date(cursor);
+        const pYear = d.getFullYear();
+        const pMonth = d.getMonth() + 1;
+        if (pYear > year) break;
+        if (pYear === year && pMonth > currentMonth) {
+          forecastMap[pMonth] = (forecastMap[pMonth] ?? 0) + payoutUsd;
+        }
+      }
+    }
+
+    // 6. Merge: historical takes priority, forecast fills future months
+    const months = Array.from({ length: 12 }, (_, i) => {
+      const m = i + 1;
+      const amount = histMap[m] ?? forecastMap[m] ?? 0;
+      return { month: m, amount: Math.round(amount * 100) / 100 };
+    });
+
+    res.json({ success: true, data: { months } });
+  } catch (err) {
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ success: false, error: err.message });
+      return;
+    }
+    res.status(500).json({ success: false, error: 'Failed to compute interest trend' });
+  }
+};
