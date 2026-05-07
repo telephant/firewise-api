@@ -17,6 +17,8 @@ export interface DcaPlan {
   next_run_date: string;
   last_run_date: string | null;
   is_active: boolean;
+  price_reference: 'open' | 'close' | 'delay';
+  price_delay_minutes: number | null;
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -105,10 +107,14 @@ export const createPlan = async (
 ): Promise<void> => {
   try {
     const ctx = await getViewContext(req);
-    const { portfolio_id, ticker, market, currency, frequency, mode, amount, shares, start_date, notes } = req.body;
+    const { portfolio_id, ticker, market, currency, frequency, mode, amount, shares, start_date, notes, price_reference, price_delay_minutes } = req.body;
 
     if (!portfolio_id || !ticker || !market || !currency || !frequency || !mode || !start_date) {
       throw new AppError('portfolio_id, ticker, market, currency, frequency, mode, and start_date are required', 400);
+    }
+    const priceRef = price_reference || 'close';
+    if (!['open', 'close', 'delay'].includes(priceRef)) {
+      throw new AppError('price_reference must be open, close, or delay', 400);
     }
     if (!['weekly', 'biweekly', 'monthly', 'quarterly', 'yearly'].includes(frequency)) {
       throw new AppError('frequency must be weekly, biweekly, monthly, quarterly, or yearly', 400);
@@ -144,6 +150,8 @@ export const createPlan = async (
         amount: mode === 'amount' ? Number(amount) : null,
         shares: mode === 'shares' ? Number(shares) : null,
         next_run_date: start_date,
+        price_reference: priceRef,
+        price_delay_minutes: priceRef === 'delay' && price_delay_minutes ? Number(price_delay_minutes) : null,
         notes: notes || null,
       })
       .select()
@@ -179,13 +187,16 @@ export const updatePlan = async (
       .single();
     if (!existing) throw new AppError('DCA plan not found', 404);
 
-    const { frequency, mode, amount, shares, next_run_date, is_active, notes } = req.body;
+    const { frequency, mode, amount, shares, next_run_date, is_active, notes, price_reference, price_delay_minutes } = req.body;
 
     if (frequency !== undefined && !['weekly', 'biweekly', 'monthly', 'quarterly', 'yearly'].includes(frequency)) {
       throw new AppError('frequency must be weekly, biweekly, monthly, quarterly, or yearly', 400);
     }
     if (mode !== undefined && !['amount', 'shares'].includes(mode)) {
       throw new AppError('mode must be amount or shares', 400);
+    }
+    if (price_reference !== undefined && !['open', 'close', 'delay'].includes(price_reference)) {
+      throw new AppError('price_reference must be open, close, or delay', 400);
     }
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -196,6 +207,10 @@ export const updatePlan = async (
     if (next_run_date !== undefined) updates.next_run_date = next_run_date;
     if (is_active !== undefined) updates.is_active = is_active;
     if (notes !== undefined) updates.notes = notes;
+    if (price_reference !== undefined) {
+      updates.price_reference = price_reference;
+      updates.price_delay_minutes = price_reference === 'delay' && price_delay_minutes ? Number(price_delay_minutes) : null;
+    }
 
     const { data, error } = await supabaseAdmin
       .from('dca_plans')
@@ -272,7 +287,37 @@ export const listPending = async (
 
     const { data, error } = await query;
     if (error) throw new AppError('Failed to fetch pending DCA records', 500);
-    res.json({ success: true, data: data || [] });
+
+    const records = data || [];
+
+    // For any records missing suggested_price, fetch current price and backfill
+    const missing = records.filter((r: DcaPending) => r.suggested_price === null);
+    if (missing.length > 0) {
+      const { fetchStockPrices, formatTickerForYFinance } = await import('../utils/findata-client');
+      const tickers = [...new Set(missing.map((r: DcaPending) => formatTickerForYFinance(r.ticker, r.market)))];
+      const prices = await fetchStockPrices(tickers as string[]);
+
+      for (const record of missing) {
+        const yfTicker = formatTickerForYFinance(record.ticker, record.market);
+        const priceData = prices[yfTicker] || prices[record.ticker];
+        if (!priceData?.price) continue;
+        const suggestedPrice = priceData.price;
+        const suggestedShares =
+          record.mode === 'amount' && record.amount
+            ? Math.round((record.amount / suggestedPrice) * 1e6) / 1e6
+            : null;
+        // Update in DB so next load is instant
+        await supabaseAdmin.from('dca_pending').update({
+          suggested_price: suggestedPrice,
+          suggested_shares: suggestedShares,
+        }).eq('id', record.id);
+        // Patch in-memory response too
+        record.suggested_price = suggestedPrice;
+        record.suggested_shares = suggestedShares;
+      }
+    }
+
+    res.json({ success: true, data: records });
   } catch (err) {
     if (err instanceof AppError) {
       res.status(err.statusCode).json({ success: false, error: err.message });
@@ -411,15 +456,30 @@ export const processDca = async (
       return;
     }
 
-    const { fetchStockPrices } = await import('../utils/findata-client');
-    const tickers = [...new Set(duePlans.map((p: DcaPlan) => `${p.ticker}.${p.market}`))];
-    const prices = await fetchStockPrices(tickers);
+    const { fetchStockPrices, fetchPriceAtTime, formatTickerForYFinance } = await import('../utils/findata-client');
+
+    // For 'close' mode, batch fetch current prices; for open/delay, fetch individually
+    const closePlans = (duePlans as DcaPlan[]).filter(p => (p.price_reference || 'close') === 'close');
+    const closeTickers = [...new Set(closePlans.map((p: DcaPlan) => formatTickerForYFinance(p.ticker, p.market)))];
+    const closePrices = closeTickers.length > 0 ? await fetchStockPrices(closeTickers) : {};
 
     let processed = 0;
     for (const plan of duePlans as DcaPlan[]) {
-      const priceKey = `${plan.ticker}.${plan.market}`;
-      const priceData = prices[priceKey] || prices[plan.ticker];
-      const suggestedPrice = priceData?.price ?? null;
+      const priceRef = plan.price_reference || 'close';
+      const yfTicker = formatTickerForYFinance(plan.ticker, plan.market);
+      let suggestedPrice: number | null = null;
+
+      if (priceRef === 'close') {
+        const priceData = closePrices[yfTicker] || closePrices[plan.ticker];
+        suggestedPrice = priceData?.price ?? null;
+      } else if (priceRef === 'open') {
+        const data = await fetchPriceAtTime(yfTicker, 0);
+        suggestedPrice = data?.price ?? null;
+      } else if (priceRef === 'delay') {
+        const minutes = plan.price_delay_minutes ?? 30;
+        const data = await fetchPriceAtTime(yfTicker, minutes);
+        suggestedPrice = data?.price ?? null;
+      }
       const suggestedShares =
         plan.mode === 'amount' && suggestedPrice && plan.amount
           ? Math.round((plan.amount / suggestedPrice) * 1e6) / 1e6

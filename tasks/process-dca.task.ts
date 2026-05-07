@@ -10,7 +10,8 @@
 import { createClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
 import * as findata from '../src/utils/findata-client';
-import type { StockPrice } from '../src/utils/findata-client';
+import type { StockPrice, PriceAtTime } from '../src/utils/findata-client';
+import { formatTickerForYFinance } from '../src/utils/findata-client';
 
 dotenv.config();
 
@@ -25,6 +26,8 @@ interface DcaPlan {
   amount: number | null;
   shares: number | null;
   next_run_date: string;
+  price_reference: 'open' | 'close' | 'delay' | null;
+  price_delay_minutes: number | null;
 }
 
 function advanceDate(date: string, frequency: DcaPlan['frequency']): string {
@@ -76,22 +79,42 @@ export class ProcessDcaTask {
 
     console.log(`[ProcessDca] Found ${duePlans.length} due plans.`);
 
-    // Batch fetch prices
-    const tickers = [...new Set(duePlans.map((p: DcaPlan) => `${p.ticker}.${p.market}`))];
-    let prices: Record<string, StockPrice> = {};
+    // Batch fetch prices for 'close' plans; open/delay plans fetched individually
+    const plans = duePlans as DcaPlan[];
+    const closePlans = plans.filter(p => (p.price_reference || 'close') === 'close');
+    const closeTickers = [...new Set(closePlans.map(p => formatTickerForYFinance(p.ticker, p.market)))];
+    let closePrices: Record<string, StockPrice> = {};
     try {
-      prices = await findata.fetchStockPrices(tickers as string[]);
+      if (closeTickers.length > 0) {
+        closePrices = await findata.fetchStockPrices(closeTickers);
+      }
     } catch (e) {
-      console.error('[ProcessDca] Failed to fetch prices, continuing with null prices:', e);
+      console.error('[ProcessDca] Failed to fetch close prices, continuing with null prices:', e);
     }
 
     let processed = 0;
     let failed = 0;
 
-    for (const plan of duePlans as DcaPlan[]) {
-      const priceKey = `${plan.ticker}.${plan.market}`;
-      const priceData: StockPrice | null = prices[priceKey] || prices[plan.ticker] || null;
-      const suggestedPrice = priceData?.price ?? null;
+    for (const plan of plans) {
+      const priceRef = plan.price_reference || 'close';
+      const yfTicker = formatTickerForYFinance(plan.ticker, plan.market);
+      let suggestedPrice: number | null = null;
+
+      try {
+        if (priceRef === 'close') {
+          const priceData: StockPrice | null = closePrices[yfTicker] || closePrices[plan.ticker] || null;
+          suggestedPrice = priceData?.price ?? null;
+        } else if (priceRef === 'open') {
+          const data: PriceAtTime | null = await findata.fetchPriceAtTime(yfTicker, 0);
+          suggestedPrice = data?.price ?? null;
+        } else if (priceRef === 'delay') {
+          const minutes = plan.price_delay_minutes ?? 30;
+          const data: PriceAtTime | null = await findata.fetchPriceAtTime(yfTicker, minutes);
+          suggestedPrice = data?.price ?? null;
+        }
+      } catch (e) {
+        console.error(`[ProcessDca] Failed to fetch price for plan ${plan.id}:`, e);
+      }
       const suggestedShares =
         plan.mode === 'amount' && suggestedPrice && plan.amount
           ? Math.round((plan.amount / suggestedPrice) * 1e6) / 1e6

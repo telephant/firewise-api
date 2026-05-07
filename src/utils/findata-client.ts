@@ -6,6 +6,56 @@
 
 const FINDATA_BASE_URL = process.env.FINDATA_URL || 'http://localhost:8002';
 
+/**
+ * Convert internal market code to yfinance ticker suffix.
+ *
+ * Internal market codes (stored in dca_plans.market):
+ *   US, SGX, HK, CN, JP, UK, AU, CA, DE, FR, TW, KR
+ *
+ * yfinance suffix conventions:
+ *   US  → no suffix      (AAPL, MSFT)
+ *   SGX → .SI            (D05.SI)
+ *   HK  → .HK            (0700.HK)
+ *   CN  → .SS (Shanghai) (600519.SS) — default, SZ stocks need .SZ
+ *   JP  → .T             (7203.T)
+ *   UK  → .L             (VOD.L)
+ *   AU  → .AX            (CBA.AX)
+ *   CA  → .TO            (TD.TO)
+ *   DE  → .DE            (SAP.DE)
+ *   FR  → .PA            (MC.PA)
+ *   TW  → .TW            (2330.TW)
+ *   KR  → .KS            (005930.KS)
+ */
+const MARKET_TO_SUFFIX: Record<string, string> = {
+  US:  '',
+  SGX: '.SI',
+  HK:  '.HK',
+  CN:  '.SS',
+  JP:  '.T',
+  UK:  '.L',
+  AU:  '.AX',
+  CA:  '.TO',
+  DE:  '.DE',
+  FR:  '.PA',
+  TW:  '.TW',
+  KR:  '.KS',
+};
+
+/**
+ * Format ticker for yfinance: appends the correct suffix based on market code.
+ * e.g. ("AAPL", "US") → "AAPL"
+ *      ("D05",  "SGX") → "D05.SI"
+ *      ("0700", "HK")  → "0700.HK"
+ */
+export function formatTickerForYFinance(ticker: string, market: string): string {
+  const suffix = MARKET_TO_SUFFIX[market.toUpperCase()];
+  if (suffix === undefined) {
+    // Unknown market — fall back to the old behaviour so nothing breaks
+    return `${ticker}.${market}`;
+  }
+  return `${ticker}${suffix}`;
+}
+
 interface StockPrice {
   ticker: string;
   price: number | null;
@@ -73,6 +123,15 @@ interface PriceAtDate {
   year: number;
   month: number;
   currency: string;
+}
+
+interface PriceAtTime {
+  ticker: string;
+  price: number | null;
+  reference: string; // "open", "delay", "fallback"
+  minutes_after_open: number;
+  currency: string;
+  timestamp: string | null;
 }
 
 // In-memory cache with TTL
@@ -334,6 +393,34 @@ export async function fetchPriceAtDate(
 }
 
 /**
+ * Fetch price at a specific number of minutes after market open today
+ * minutes_after_open=0 → open price; N → price N minutes after open
+ */
+export async function fetchPriceAtTime(
+  ticker: string,
+  minutesAfterOpen: number = 0
+): Promise<PriceAtTime | null> {
+  const cacheKey = `price-at-time:${ticker}:${minutesAfterOpen}`;
+  // Short TTL — intraday data changes frequently
+  const cached = getCached<PriceAtTime>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(
+      `${FINDATA_BASE_URL}/stock/price-at-time/${ticker}?minutes_after_open=${minutesAfterOpen}`
+    );
+    if (!response.ok) return null;
+
+    const data = await response.json() as PriceAtTime;
+    setCached(cacheKey, data, TTL.PRICE); // 1-minute cache
+    return data;
+  } catch (error) {
+    console.error(`Error fetching price at time for ${ticker}:`, error);
+    return null;
+  }
+}
+
+/**
  * Check if findata service is healthy
  */
 export async function checkHealth(): Promise<boolean> {
@@ -353,4 +440,5 @@ export type {
   CAGRData,
   SymbolSearchResult,
   PriceAtDate,
+  PriceAtTime,
 };
