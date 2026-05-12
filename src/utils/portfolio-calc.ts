@@ -35,21 +35,25 @@ export function computePositions(trades: Trade[]): Map<string, PositionState> {
 
 export function buildHoldings(
   trades: Trade[],
-  priceMap: Record<string, { price: number | null; currency: string }>
+  priceMap: Record<string, { price: number | null; currency: string; quote_type?: string | null }>
 ): Holding[] {
   const positions = computePositions(trades);
   const holdings: Holding[] = [];
 
-  // Get market/currency from last trade for each ticker
-  const tickerMeta = new Map<string, { market: string; currency: string }>();
+  // Get market/currency/asset_subtype from last trade for each ticker
+  const tickerMeta = new Map<string, { market: string; currency: string; asset_subtype: Holding['asset_subtype'] }>();
   for (const t of trades) {
-    tickerMeta.set(t.ticker.toUpperCase(), { market: t.market, currency: t.currency });
+    tickerMeta.set(t.ticker.toUpperCase(), {
+      market: t.market,
+      currency: t.currency,
+      asset_subtype: t.asset_subtype ?? null,
+    });
   }
 
   for (const [ticker, pos] of positions) {
     if (pos.shares <= 0) continue; // skip closed positions
 
-    const meta = tickerMeta.get(ticker) || { market: 'US', currency: 'USD' };
+    const meta = tickerMeta.get(ticker) || { market: 'US', currency: 'USD', asset_subtype: null };
     const priceData = priceMap[ticker];
     const current_price = priceData?.price ?? null;
     const cost = pos.shares * pos.avg_cost;
@@ -57,6 +61,10 @@ export function buildHoldings(
     const unrealized_pl = value !== null ? value - cost : null;
     const unrealized_pl_pct =
       unrealized_pl !== null && cost > 0 ? (unrealized_pl / cost) * 100 : null;
+
+    // asset_subtype: prefer trade metadata; fall back to findata quote_type if trade has none
+    const subtypeFromPrice = priceData?.quote_type as Holding['asset_subtype'] ?? null;
+    const asset_subtype = meta.asset_subtype ?? subtypeFromPrice;
 
     holdings.push({
       ticker,
@@ -69,6 +77,7 @@ export function buildHoldings(
       cost,
       unrealized_pl,
       unrealized_pl_pct,
+      asset_subtype,
     });
   }
 

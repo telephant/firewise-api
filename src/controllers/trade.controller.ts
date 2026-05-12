@@ -5,6 +5,7 @@ import { AppError } from '../middleware/error';
 import { getViewContext } from '../utils/family-context';
 import { Trade } from '../types/portfolio';
 import { COMMODITY_CONFIG, COMMODITY_TICKERS, VALID_UNITS } from '../config/commodities';
+import { fetchStockPrice, formatTickerForYFinance } from '../utils/findata-client';
 
 /**
  * Verify that a portfolio belongs to the current user/family context.
@@ -104,6 +105,25 @@ export const createTrade = async (
       resolvedMarket = market;
     }
 
+    // Resolve asset_subtype from findata quote_type (commodity is always 'commodity')
+    let resolvedAssetSubtype: Trade['asset_subtype'] = null;
+    if (resolvedAssetType === 'commodity') {
+      resolvedAssetSubtype = 'commodity';
+    } else {
+      try {
+        const yfTicker = formatTickerForYFinance(ticker.toUpperCase(), resolvedMarket);
+        const priceData = await fetchStockPrice(yfTicker);
+        const qt = priceData?.quote_type;
+        if (qt === 'stock' || qt === 'etf' || qt === 'crypto' || qt === 'fund' || qt === 'other') {
+          resolvedAssetSubtype = qt;
+        } else if (qt) {
+          resolvedAssetSubtype = 'other';
+        }
+      } catch {
+        // non-fatal: leave as null
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('trades')
       .insert({
@@ -117,6 +137,7 @@ export const createTrade = async (
         date,
         notes: notes || null,
         asset_type: resolvedAssetType,
+        asset_subtype: resolvedAssetSubtype,
         unit: resolvedUnit,
       })
       .select()

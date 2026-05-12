@@ -69,6 +69,7 @@ interface StockPrice {
   change: number | null;
   change_percent: number | null;
   timestamp: string;
+  quote_type: string | null;
 }
 
 interface DividendEvent {

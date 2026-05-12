@@ -21,6 +21,7 @@ export interface Trade {
   notes: string | null;
   created_at: string;
   asset_type: 'stock' | 'commodity'; // DB default 'stock'; required in create payload for commodity trades
+  asset_subtype: 'stock' | 'etf' | 'commodity' | 'crypto' | 'fund' | 'other' | null;
   unit: string | null;
 }
 
@@ -36,6 +37,7 @@ export interface Holding {
   cost: number;
   unrealized_pl: number | null;
   unrealized_pl_pct: number | null;
+  asset_subtype: 'stock' | 'etf' | 'commodity' | 'crypto' | 'fund' | 'other' | null;
 }
 
 export interface Dividend {
