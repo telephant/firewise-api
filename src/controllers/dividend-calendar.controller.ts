@@ -164,6 +164,12 @@ export const getDividendCalendar = async (
     const activePositions = Array.from(positions.entries())
       .filter(([, pos]) => pos.shares > 0.0001);
 
+    // Build ticker → market map for tax rate lookup on forecasted dividends
+    const tickerMarket = new Map<string, string>();
+    for (const t of tradeList) {
+      tickerMarket.set(t.ticker.toUpperCase(), t.market || 'US');
+    }
+
     // Fetch findata BEFORE building rateMap so we can include forecasted stock currencies
     let dividendData: Awaited<ReturnType<typeof findata.fetchDividendsBatch>> = {};
     if (activePositions.length > 0) {
@@ -196,14 +202,15 @@ export const getDividendCalendar = async (
       };
     };
 
-    // 5. Add actual dividends to months (gross amount; frontend applies tax)
+    // 5. Add actual dividends to months — net amount (gross minus tax withheld)
     (actualDividends || []).forEach((d: Dividend) => {
       const month = new Date(d.ex_date).getMonth();
-      const converted = convertToPreferred(d.total_amount, d.currency);
+      const netAmount = (d.total_amount || 0) - (d.tax_withheld || 0);
+      const converted = convertToPreferred(netAmount, d.currency);
 
       months[month].dividends.push({
         ticker: d.ticker,
-        assetId: d.portfolio_id, // use portfolio_id as reference
+        assetId: d.portfolio_id,
         amount: converted.amount,
         isForecasted: false,
         date: d.ex_date,
@@ -227,7 +234,10 @@ export const getDividendCalendar = async (
           if (!div.is_forecasted) continue;
 
           const forecastedAmount = div.amount * pos.shares;
-          const converted = convertToPreferred(forecastedAmount, stockCurrency);
+          const market = tickerMarket.get(ticker.toUpperCase()) || 'US';
+          const taxRate = market === 'US' ? taxRates.us : market === 'SGX' ? taxRates.sg : 0;
+          const netForecastedAmount = forecastedAmount * (1 - taxRate);
+          const converted = convertToPreferred(netForecastedAmount, stockCurrency);
 
           months[div.month].dividends.push({
             ticker,
@@ -235,7 +245,7 @@ export const getDividendCalendar = async (
             amount: converted.amount,
             isForecasted: true,
             frequency,
-            market: null,
+            market,
           });
           months[div.month].total += converted.amount;
         }

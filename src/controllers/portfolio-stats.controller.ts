@@ -110,43 +110,45 @@ export const getPortfolioStats = async (
     const [ytdResult, mtdResult] = await Promise.all([
       supabaseAdmin
         .from('dividends')
-        .select('total_amount, currency')
+        .select('total_amount, tax_withheld, currency')
         .eq('portfolio_id', portfolioId)
         .gte('ex_date', `${currentYear}-01-01`)
         .lte('ex_date', `${currentYear}-12-31`),
       supabaseAdmin
         .from('dividends')
-        .select('total_amount, currency')
+        .select('total_amount, tax_withheld, currency')
         .eq('portfolio_id', portfolioId)
         .gte('ex_date', `${currentYear}-${monthStr}-01`)
         .lte('ex_date', `${currentYear}-${monthStr}-${daysInMonth}`),
     ]);
 
     const dividend_ytd = (ytdResult.data || []).reduce(
-      (sum, row) => sum + toUSD(row.total_amount || 0, row.currency || 'USD'), 0
+      (sum, row) => sum + toUSD((row.total_amount || 0) - (row.tax_withheld || 0), row.currency || 'USD'), 0
     );
     const dividend_mtd = (mtdResult.data || []).reduce(
-      (sum, row) => sum + toUSD(row.total_amount || 0, row.currency || 'USD'), 0
+      (sum, row) => sum + toUSD((row.total_amount || 0) - (row.tax_withheld || 0), row.currency || 'USD'), 0
     );
 
     // 6. MoM gain from last 2 snapshots
     const { data: snapshots } = await supabaseAdmin
       .from('portfolio_snapshots')
-      .select('total_value, snapshot_date, currency')
+      .select('total_value, unrealized_pl, snapshot_date, currency')
       .eq('portfolio_id', portfolioId)
       .order('snapshot_date', { ascending: false })
       .limit(2);
 
     let mom_gain: number | null = null;
     let mom_gain_pct: number | null = null;
+    let mom_unrealized_pl: number | null = null;
 
     if (snapshots && snapshots.length >= 2) {
       const prevSnapshot = snapshots[1];
-      // Only compute mom_gain if snapshot is in USD (cannot reliably compare different currencies)
+      // Only compute MoM values if snapshot is in USD (cannot reliably compare different currencies)
       if ((prevSnapshot.currency || '').toUpperCase() === 'USD') {
         mom_gain = total_value - prevSnapshot.total_value + dividend_mtd;
         mom_gain_pct =
           prevSnapshot.total_value > 0 ? (mom_gain / prevSnapshot.total_value) * 100 : null;
+        mom_unrealized_pl = unrealized_pl - (prevSnapshot.unrealized_pl ?? 0);
       }
     }
 
@@ -159,6 +161,7 @@ export const getPortfolioStats = async (
       dividend_mtd,
       mom_gain,
       mom_gain_pct,
+      mom_unrealized_pl,
       currency: 'USD',
     };
 
