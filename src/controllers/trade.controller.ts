@@ -99,8 +99,8 @@ export const createTrade = async (
       }
       resolvedMarket = 'COMMODITY';
     } else {
-      if (!market || !['US', 'SGX', 'HK', 'CN'].includes(market)) {
-        throw new AppError('market must be one of: US, SGX, HK, CN', 400);
+      if (!market || !['US', 'SGX', 'HK', 'CN', 'SE'].includes(market)) {
+        throw new AppError('market must be one of: US, SGX, HK, CN, SE', 400);
       }
       resolvedMarket = market;
     }

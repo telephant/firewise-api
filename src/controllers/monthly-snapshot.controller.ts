@@ -98,6 +98,12 @@ export const getSnapshots = async (
     const { data: snapshots, error } = await query;
 
     if (error) {
+      console.error('[snapshots] supabase error:', error);
+      // Table may not exist yet — return empty list instead of 500
+      if (error.code === 'PGRST205' || error.code === '42P01') {
+        res.json({ success: true, data: { snapshots: [] } });
+        return;
+      }
       throw new AppError('Failed to fetch snapshots', 500);
     }
 
@@ -136,11 +142,13 @@ export const getSnapshots = async (
       data: { snapshots: convertedSnapshots },
     });
   } catch (err) {
+    console.error('[snapshots] unexpected error:', err);
     if (err instanceof AppError) {
       res.status(err.statusCode).json({ success: false, error: err.message });
       return;
     }
-    res.status(500).json({ success: false, error: 'Failed to fetch snapshots' });
+    const message = err instanceof Error ? err.message : 'Failed to fetch snapshots';
+    res.status(500).json({ success: false, error: message });
   }
 };
 
