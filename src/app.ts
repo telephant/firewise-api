@@ -9,7 +9,9 @@ const app = express();
 
 // CORS - must be first, before helmet
 app.use(cors({
-  origin: true,
+  origin: process.env.NODE_ENV === 'production'
+    ? process.env.FRONTEND_URL || 'https://firewise.app'
+    : true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-View-Mode', 'x-family-id'],

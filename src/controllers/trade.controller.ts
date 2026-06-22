@@ -186,8 +186,8 @@ export const updateTrade = async (
 
     const isCommodity = existing.asset_type === 'commodity';
 
-    if (market && !isCommodity && !['US', 'SGX', 'HK', 'CN'].includes(market)) {
-      throw new AppError('market must be one of: US, SGX, HK, CN', 400);
+    if (market && !isCommodity && !['US', 'SGX', 'HK', 'CN', 'SE'].includes(market)) {
+      throw new AppError('market must be one of: US, SGX, HK, CN, SE', 400);
     }
 
     if (type && !['buy', 'sell'].includes(type)) {
