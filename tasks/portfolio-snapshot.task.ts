@@ -244,7 +244,7 @@ export class PortfolioSnapshotTask {
 
           // If not in cache, fetch from findata
           if (price === null) {
-            const priceData = await findata.fetchPriceAtDate(ticker, this.targetYear, this.targetMonth);
+            const priceData = await findata.fetchPriceAtDate(ticker, year, month);
             if (priceData && priceData.price !== null) {
               price = priceData.price;
               if (priceData.currency) priceCurrency = priceData.currency;
