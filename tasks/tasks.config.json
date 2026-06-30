@@ -2,7 +2,8 @@
   "dailyTasks": [
     "update-currency",
     "process-dca",
-    "dividend-sync"
+    "dividend-sync",
+    "savings-interest"
   ],
   "weeklyTasks": [
     "price-cache-cleanup"

@@ -34,6 +34,7 @@ import { DividendSyncTask } from './dividend-sync.task';
 import { PortfolioSnapshotTask } from './portfolio-snapshot.task';
 import { PriceCacheCleanupTask } from './price-cache-cleanup.task';
 import { ProcessDcaTask } from './process-dca.task';
+import { SavingsInterestTask } from './savings-interest.task';
 
 // ── Task factory ────────────────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ const TASK_FACTORY: Record<string, () => { run: () => Promise<void> }> = {
   'update-currency':    () => new UpdateCurrencyTask(),
   'process-dca':        () => new ProcessDcaTask(),
   'dividend-sync':      () => new DividendSyncTask(),
+  'savings-interest':   () => new SavingsInterestTask(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask(),
   'portfolio-snapshot': () => new PortfolioSnapshotTask(),
 };
@@ -111,6 +113,7 @@ const TASKS: Record<string, () => Promise<void>> = {
   'update-currency':     () => new UpdateCurrencyTask().run(),
   'process-dca':         () => new ProcessDcaTask().run(),
   'dividend-sync':       () => new DividendSyncTask().run(),
+  'savings-interest':    () => new SavingsInterestTask().run(),
   'price-cache-cleanup': () => new PriceCacheCleanupTask().run(),
   'portfolio-snapshot':  () => new PortfolioSnapshotTask().run(),
 };
