@@ -162,10 +162,9 @@ export class PortfolioSnapshotTask {
           unrealized_pl_usd: number;
         }> = [];
 
-        // Collect all currencies involved so we can batch-fetch rates once
+        // Collect all currencies involved (both open and closed positions) for batch rate fetch
         const involvedCurrencies = new Set<string>(['usd']);
-        for (const [ticker, pos] of positions.entries()) {
-          if (pos.shares <= 0) continue;
+        for (const ticker of positions.keys()) {
           const tradeCurr = (tickerCurrency.get(ticker) || 'USD').toLowerCase();
           involvedCurrencies.add(tradeCurr);
         }
