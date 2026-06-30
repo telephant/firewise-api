@@ -21,6 +21,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import * as findata from '../src/utils/findata-client';
+import { getExchangeRates, convertAmount } from '../src/utils/currency-conversion';
 
 dotenv.config();
 
@@ -138,7 +139,13 @@ export class PortfolioSnapshotTask {
         // Compute positions using average cost method
         const positions = this.computePositions(typedTrades);
 
-        // Build snapshot detail and compute totals
+        // Build ticker→currency map from trades (trade currency is authoritative for cost basis)
+        const tickerCurrency = new Map<string, string>();
+        for (const trade of typedTrades) {
+          tickerCurrency.set(trade.ticker.toUpperCase(), trade.currency || 'USD');
+        }
+
+        // Build snapshot detail and compute totals in USD
         let totalCost = 0;
         let totalValue = 0;
         let totalRealizedPl = 0;
@@ -146,55 +153,94 @@ export class PortfolioSnapshotTask {
           ticker: string;
           shares: number;
           price: number;
+          price_currency: string;
           value: number;
+          value_usd: number;
           cost: number;
+          cost_usd: number;
           unrealized_pl: number;
+          unrealized_pl_usd: number;
         }> = [];
+
+        // Collect all currencies involved so we can batch-fetch rates once
+        const involvedCurrencies = new Set<string>(['usd']);
+        for (const [ticker, pos] of positions.entries()) {
+          if (pos.shares <= 0) continue;
+          const tradeCurr = (tickerCurrency.get(ticker) || 'USD').toLowerCase();
+          involvedCurrencies.add(tradeCurr);
+        }
+        const rateMap = await getExchangeRates(Array.from(involvedCurrencies));
+
+        // Helper: convert any amount to USD, returns 0 and logs if rate missing
+        const toUSD = (amount: number, fromCurrency: string): number => {
+          if (fromCurrency.toLowerCase() === 'usd') return amount;
+          const result = convertAmount(amount, fromCurrency, 'USD', rateMap);
+          if (!result) {
+            console.warn(`  [snapshot] Missing rate for ${fromCurrency} → USD; treating as 0`);
+            return 0;
+          }
+          return result.converted;
+        };
 
         for (const [ticker, pos] of positions.entries()) {
           if (pos.shares <= 0) {
-            totalRealizedPl += pos.realized_pl;
+            const tradeCurr = tickerCurrency.get(ticker) || 'USD';
+            totalRealizedPl += toUSD(pos.realized_pl, tradeCurr);
             continue;
           }
 
           // Try price_cache first
           let price = await this.getPriceCached(ticker, snapshotDate);
+          let priceCurrency = tickerCurrency.get(ticker) || 'USD';
 
           // If not in cache, fetch from findata
           if (price === null) {
             const priceData = await findata.fetchPriceAtDate(ticker, this.targetYear, this.targetMonth);
             if (priceData && priceData.price !== null) {
               price = priceData.price;
-              // Store in price_cache
-              await this.cachePrice(ticker, snapshotDate, price, priceData.currency);
+              if (priceData.currency) priceCurrency = priceData.currency;
+              await this.cachePrice(ticker, snapshotDate, price, priceCurrency);
+              // Update rateMap if findata returned a new currency
+              if (!rateMap.has(priceCurrency.toLowerCase()) && priceCurrency.toLowerCase() !== 'usd') {
+                const newRates = await getExchangeRates([priceCurrency.toLowerCase()]);
+                newRates.forEach((v, k) => rateMap.set(k, v));
+              }
             }
           }
 
-          // Fall back to avg_cost if no price available
+          const tradeCurr = tickerCurrency.get(ticker) || 'USD';
+          // Fall back to avg_cost (in trade currency) if no price available
           const effectivePrice = price !== null ? price : pos.avg_cost;
-          const cost = pos.shares * pos.avg_cost;
-          const value = pos.shares * effectivePrice;
-          const unrealizedPl = value - cost;
+          const cost = pos.shares * pos.avg_cost;         // in trade currency
+          const value = pos.shares * effectivePrice;      // in price currency
+          const costUsd = toUSD(cost, tradeCurr);
+          const valueUsd = toUSD(value, priceCurrency);
+          const unrealizedPl = value - cost;              // native (only meaningful if same currency)
+          const unrealizedPlUsd = valueUsd - costUsd;
 
-          totalCost += cost;
-          totalValue += value;
-          totalRealizedPl += pos.realized_pl;
+          totalCost += costUsd;
+          totalValue += valueUsd;
+          totalRealizedPl += toUSD(pos.realized_pl, tradeCurr);
 
           detail.push({
             ticker,
             shares: pos.shares,
             price: effectivePrice,
+            price_currency: priceCurrency,
             value,
+            value_usd: valueUsd,
             cost,
+            cost_usd: costUsd,
             unrealized_pl: unrealizedPl,
+            unrealized_pl_usd: unrealizedPlUsd,
           });
         }
 
-        const unrealizedPl = totalValue - totalCost;
+        const unrealizedPl = totalValue - totalCost; // both in USD now
 
-        console.log(`  Positions: ${detail.length}, total_value=${totalValue.toFixed(2)}, total_cost=${totalCost.toFixed(2)}, unrealized_pl=${unrealizedPl.toFixed(2)}, realized_pl=${totalRealizedPl.toFixed(2)}`);
+        console.log(`  Positions: ${detail.length}, total_value_usd=${totalValue.toFixed(2)}, total_cost_usd=${totalCost.toFixed(2)}, unrealized_pl_usd=${unrealizedPl.toFixed(2)}, realized_pl_usd=${totalRealizedPl.toFixed(2)}`);
 
-        // Upsert into portfolio_snapshots
+        // Upsert into portfolio_snapshots — all monetary totals are in USD
         const { error: upsertError } = await this.supabase
           .from('portfolio_snapshots')
           .upsert(
@@ -205,7 +251,7 @@ export class PortfolioSnapshotTask {
               total_cost: totalCost,
               unrealized_pl: unrealizedPl,
               realized_pl: totalRealizedPl,
-              currency: portfolio.currency,
+              currency: 'USD', // always USD now; per-ticker native amounts are in detail[]
               detail,
             },
             { onConflict: 'portfolio_id,snapshot_date' }

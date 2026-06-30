@@ -143,12 +143,34 @@ export const getPortfolioStats = async (
 
     if (snapshots && snapshots.length >= 2) {
       const prevSnapshot = snapshots[1];
-      // Only compute MoM values if snapshot is in USD (cannot reliably compare different currencies)
-      if ((prevSnapshot.currency || '').toUpperCase() === 'USD') {
-        mom_gain = total_value - prevSnapshot.total_value + dividend_mtd;
-        mom_gain_pct =
-          prevSnapshot.total_value > 0 ? (mom_gain / prevSnapshot.total_value) * 100 : null;
-        mom_unrealized_pl = unrealized_pl - (prevSnapshot.unrealized_pl ?? 0);
+      const snapCurrency = (prevSnapshot.currency || 'USD').toUpperCase();
+
+      // Convert snapshot total_value to USD for comparison
+      // New snapshots store USD directly; legacy snapshots may store native currency
+      let prevTotalValueUsd: number | null = null;
+      let prevUnrealizedPlUsd: number | null = null;
+
+      if (snapCurrency === 'USD') {
+        prevTotalValueUsd = prevSnapshot.total_value;
+        prevUnrealizedPlUsd = prevSnapshot.unrealized_pl ?? null;
+      } else {
+        // Legacy snapshot in native currency — convert to USD using current rate
+        // This is approximate (uses today's rate, not the rate at snapshot time)
+        const snapRates = await getExchangeRates([snapCurrency.toLowerCase()]);
+        const converted = convertAmount(prevSnapshot.total_value, snapCurrency, 'USD', snapRates);
+        if (converted) {
+          prevTotalValueUsd = converted.converted;
+          if (prevSnapshot.unrealized_pl != null) {
+            const convertedPl = convertAmount(prevSnapshot.unrealized_pl, snapCurrency, 'USD', snapRates);
+            prevUnrealizedPlUsd = convertedPl ? convertedPl.converted : null;
+          }
+        }
+      }
+
+      if (prevTotalValueUsd !== null) {
+        mom_gain = total_value - prevTotalValueUsd + dividend_mtd;
+        mom_gain_pct = prevTotalValueUsd > 0 ? (mom_gain / prevTotalValueUsd) * 100 : null;
+        mom_unrealized_pl = prevUnrealizedPlUsd !== null ? unrealized_pl - prevUnrealizedPlUsd : null;
       }
     }
 
