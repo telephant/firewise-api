@@ -146,7 +146,6 @@ export class SavingsInterestTask {
       ?? account.created_at.slice(0, 10);
 
     let nextDate = computeNextPayoutDate(baseDate, account.compound_frequency);
-    let currentBalance = account.balance;
     let periodsCredited = 0;
 
     // Process all overdue periods up to today
@@ -165,7 +164,8 @@ export class SavingsInterestTask {
         continue;
       }
 
-      const amount = computeInterestAmount(currentBalance, account.interest_rate, account.compound_frequency);
+      // Simple interest: always use the original balance, not compounded
+      const amount = computeInterestAmount(account.balance, account.interest_rate, account.compound_frequency);
 
       // Insert interest record
       const { error: insertError } = await this.supabase
@@ -182,19 +182,7 @@ export class SavingsInterestTask {
         break;
       }
 
-      // Update balance (compound: balance grows each period)
-      currentBalance = Math.round((currentBalance + amount) * 100) / 100;
-      const { error: updateError } = await this.supabase
-        .from('savings_accounts')
-        .update({ balance: currentBalance, updated_at: new Date().toISOString() })
-        .eq('id', account.id);
-
-      if (updateError) {
-        console.error(`    [error] Failed to update balance for ${nextDate}:`, updateError.message);
-        break;
-      }
-
-      console.log(`    [ok] ${nextDate} — credited ${amount} (new balance: ${currentBalance})`);
+      console.log(`    [ok] ${nextDate} — credited ${amount}`);
       periodsCredited++;
       nextDate = computeNextPayoutDate(nextDate, account.compound_frequency);
     }
