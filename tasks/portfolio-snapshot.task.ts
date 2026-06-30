@@ -52,8 +52,8 @@ interface Position {
 
 export class PortfolioSnapshotTask {
   private supabase: SupabaseClient;
-  private targetYear: number;
-  private targetMonth: number; // 1-12
+  // When --month is provided, run only that specific month (manual override)
+  private manualMonth: { year: number; month: number } | null = null;
 
   constructor() {
     const supabaseUrl = process.env.SUPABASE_URL;
@@ -70,30 +70,71 @@ export class PortfolioSnapshotTask {
       },
     });
 
-    // Parse --month=YYYY-MM from process.argv if present
+    // Parse --month=YYYY-MM from process.argv if present (manual override)
     const monthArg = process.argv.find(arg => arg.startsWith('--month='));
     if (monthArg) {
       const [year, month] = monthArg.replace('--month=', '').split('-').map(Number);
       if (!year || !month || month < 1 || month > 12) {
         throw new Error(`Invalid --month argument: ${monthArg}. Expected format: --month=YYYY-MM`);
       }
-      this.targetYear = year;
-      this.targetMonth = month;
-    } else {
-      // Default: previous month
-      const now = new Date();
-      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      this.targetYear = prev.getFullYear();
-      this.targetMonth = prev.getMonth() + 1; // 1-12
+      this.manualMonth = { year, month };
     }
   }
 
+  /**
+   * Determine which snapshot dates to run:
+   *
+   * Manual mode (--month=YYYY-MM):
+   *   - Run only that month's last day
+   *
+   * Auto mode (default):
+   *   - Always run current month (snapshot_date = today)
+   *   - Also run prev month (snapshot_date = last day of prev month)
+   *     UNLESS a snapshot already exists for that date in ALL portfolios
+   */
+  private async resolveSnapshotDates(portfolioIds: string[]): Promise<{ date: string; year: number; month: number }[]> {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1;
+
+    // Manual override: just that one month
+    if (this.manualMonth) {
+      const { year, month } = this.manualMonth;
+      return [{ date: this.getLastDayOfMonth(year, month), year, month }];
+    }
+
+    const dates: { date: string; year: number; month: number }[] = [];
+
+    // 1. Always include current month (today as snapshot_date)
+    dates.push({ date: today, year: currentYear, month: currentMonth });
+
+    // 2. Check if prev month's last-day snapshot exists for ALL portfolios
+    const prevDate = new Date(currentYear, currentMonth - 2, 1); // first day of prev month
+    const prevYear = prevDate.getFullYear();
+    const prevMonth = prevDate.getMonth() + 1;
+    const prevLastDay = this.getLastDayOfMonth(prevYear, prevMonth);
+
+    const { data: existing } = await this.supabase
+      .from('portfolio_snapshots')
+      .select('portfolio_id')
+      .in('portfolio_id', portfolioIds)
+      .eq('snapshot_date', prevLastDay);
+
+    const existingIds = new Set((existing || []).map((r: { portfolio_id: string }) => r.portfolio_id));
+    const allCovered = portfolioIds.every(id => existingIds.has(id));
+
+    if (!allCovered) {
+      // Prepend so prev month runs first
+      dates.unshift({ date: prevLastDay, year: prevYear, month: prevMonth });
+    } else {
+      console.log(`Prev month (${prevLastDay}) snapshot already complete for all portfolios — skipping.`);
+    }
+
+    return dates;
+  }
+
   async run(): Promise<void> {
-    const monthStr = `${this.targetYear}-${String(this.targetMonth).padStart(2, '0')}`;
-    const snapshotDate = this.getLastDayOfMonth(this.targetYear, this.targetMonth);
-
-    console.log(`Starting portfolio snapshot for ${monthStr} (snapshot_date=${snapshotDate})...`);
-
     // Get all portfolios
     const { data: portfolios, error: portfolioError } = await this.supabase
       .from('portfolios')
@@ -110,11 +151,20 @@ export class PortfolioSnapshotTask {
 
     console.log(`Found ${portfolios.length} portfolio(s)`);
 
+    const portfolioIds = (portfolios as Portfolio[]).map(p => p.id);
+    const snapshotDates = await this.resolveSnapshotDates(portfolioIds);
+
+    console.log(`Will run snapshots for: ${snapshotDates.map(d => d.date).join(', ')}`);
+
     let totalSnapshots = 0;
     let totalErrors = 0;
 
-    for (const portfolio of portfolios as Portfolio[]) {
-      console.log(`\nProcessing portfolio: ${portfolio.name} (${portfolio.id})`);
+    for (const { date: snapshotDate, year, month } of snapshotDates) {
+      const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+      console.log(`\n=== Snapshot for ${monthStr} (snapshot_date=${snapshotDate}) ===`);
+
+      for (const portfolio of portfolios as Portfolio[]) {
+        console.log(`\nProcessing portfolio: ${portfolio.name} (${portfolio.id})`);
 
       try {
         // Get all trades up to (and including) snapshot_date
@@ -266,7 +316,8 @@ export class PortfolioSnapshotTask {
         console.error(`  Error processing portfolio ${portfolio.id}:`, err);
         totalErrors++;
       }
-    }
+      } // end portfolio loop
+    } // end snapshotDates loop
 
     console.log('\n========================================');
     console.log('  Portfolio Snapshot Summary');
