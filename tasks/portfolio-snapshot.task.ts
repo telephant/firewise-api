@@ -238,17 +238,24 @@ export class PortfolioSnapshotTask {
             continue;
           }
 
-          // Try price_cache first
-          let price = await this.getPriceCached(ticker, snapshotDate);
+          // Manual mode (--month): always fetch fresh from findata, skip cache
+          let price: number | null = null;
           let priceCurrency = tickerCurrency.get(ticker) || 'USD';
 
-          // If not in cache, fetch from findata
+          if (!this.manualMonth) {
+            price = await this.getPriceCached(ticker, snapshotDate);
+          }
+
+          // Fetch from findata if cache miss or manual mode
           if (price === null) {
             const priceData = await findata.fetchPriceAtDate(ticker, year, month);
             if (priceData && priceData.price !== null) {
               price = priceData.price;
               if (priceData.currency) priceCurrency = priceData.currency;
-              await this.cachePrice(ticker, snapshotDate, price, priceCurrency);
+              // Only write to cache in auto mode
+              if (!this.manualMonth) {
+                await this.cachePrice(ticker, snapshotDate, price, priceCurrency);
+              }
               // Update rateMap if findata returned a new currency
               if (!rateMap.has(priceCurrency.toLowerCase()) && priceCurrency.toLowerCase() !== 'usd') {
                 const newRates = await getExchangeRates([priceCurrency.toLowerCase()]);
